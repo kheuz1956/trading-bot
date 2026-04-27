@@ -1,0 +1,794 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Budget VN 2026 — Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      body {
+        font-family: 'Inter', system-ui, sans-serif;
+      }
+      .num {
+        font-variant-numeric: tabular-nums;
+      }
+      .scrollbar-thin::-webkit-scrollbar {
+        height: 8px;
+        width: 8px;
+      }
+      .scrollbar-thin::-webkit-scrollbar-thumb {
+        background: #cbd5e1;
+        border-radius: 4px;
+      }
+    </style>
+  </head>
+  <body class="bg-slate-50 text-slate-900">
+    <!-- Embedded data: replaced at build time by scripts/build-local-dashboard.py -->
+    <script id="budget-data" type="application/json">
+      __DATA__
+    </script>
+    <script id="build-meta" type="application/json">
+      __META__
+    </script>
+
+    <header class="border-b border-slate-200 bg-white">
+      <div class="mx-auto flex max-w-[1400px] items-center justify-between px-6 py-4">
+        <div>
+          <p class="text-xs font-semibold uppercase tracking-wider text-slate-500">
+            Budget Véhicules Neufs · 2026
+          </p>
+          <h1 class="text-2xl font-bold">Dashboard local</h1>
+        </div>
+        <div class="text-right text-xs text-slate-500">
+          <p>Source : <span id="source-file" class="font-medium text-slate-700">—</span></p>
+          <p>Généré : <span id="build-date" class="font-medium text-slate-700">—</span></p>
+        </div>
+      </div>
+    </header>
+
+    <main class="mx-auto max-w-[1400px] px-6 py-6">
+      <!-- Filters -->
+      <section
+        class="mb-5 flex flex-wrap items-end gap-3 rounded-xl border border-slate-200 bg-white p-4"
+      >
+        <div>
+          <label class="block text-xs font-medium text-slate-500">Marque</label>
+          <select
+            id="filter-brand"
+            class="mt-1 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm"
+          >
+            <option value="ALL">Toutes</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-slate-500">Période</label>
+          <select
+            id="filter-period"
+            class="mt-1 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm"
+          >
+            <option value="2026-monthly">Mensuel 2026 (12 mois)</option>
+            <option value="2026-S1-budget">Budget S1 2026</option>
+            <option value="2026-S1-actual">Réalisé S1 2026</option>
+            <option value="2026-S2-budget">Budget S2 2026</option>
+            <option value="ALL">Toutes</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-slate-500">Vue</label>
+          <select
+            id="filter-view"
+            class="mt-1 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm"
+          >
+            <option value="VALUE">Montants FCFA</option>
+            <option value="THOUSAND">Milliers FCFA</option>
+            <option value="MILLION">Millions FCFA</option>
+          </select>
+        </div>
+        <div class="ml-auto flex items-center gap-3 text-xs">
+          <span class="rounded-full bg-blue-100 px-2 py-1 font-medium text-blue-700"
+            >Records : <span id="kpi-records" class="num">—</span></span
+          >
+          <span class="rounded-full bg-emerald-100 px-2 py-1 font-medium text-emerald-700"
+            >Modèles : <span id="kpi-models" class="num">—</span></span
+          >
+          <span class="rounded-full bg-amber-100 px-2 py-1 font-medium text-amber-700"
+            >Anomalies : <span id="kpi-anomalies" class="num">—</span></span
+          >
+        </div>
+      </section>
+
+      <!-- KPI cards -->
+      <section class="mb-5 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <div class="rounded-xl border border-slate-200 bg-white p-5">
+          <p class="text-sm font-medium text-slate-500">CA Budget total</p>
+          <p class="mt-2 text-3xl font-bold num" id="kpi-ca">—</p>
+          <p class="mt-1 text-xs text-slate-500">
+            Selon filtres · <span id="kpi-ca-period" class="font-medium">—</span>
+          </p>
+        </div>
+        <div class="rounded-xl border border-slate-200 bg-white p-5">
+          <p class="text-sm font-medium text-slate-500">Volume total</p>
+          <p class="mt-2 text-3xl font-bold num" id="kpi-volume">—</p>
+          <p class="mt-1 text-xs text-slate-500">unités · UNITES</p>
+        </div>
+        <div class="rounded-xl border border-slate-200 bg-white p-5">
+          <p class="text-sm font-medium text-slate-500">Marge totale</p>
+          <p class="mt-2 text-3xl font-bold num" id="kpi-marge">—</p>
+          <p class="mt-1 text-xs text-slate-500">CA − REVIENT (somme)</p>
+        </div>
+        <div class="rounded-xl border border-slate-200 bg-white p-5">
+          <p class="text-sm font-medium text-slate-500">Taux de marge</p>
+          <p class="mt-2 text-3xl font-bold num" id="kpi-marge-rate">—</p>
+          <p class="mt-1 text-xs text-slate-500">Marge / CA · pondéré</p>
+        </div>
+      </section>
+
+      <!-- Charts row 1 -->
+      <section class="mb-5 grid grid-cols-1 gap-4 lg:grid-cols-3">
+        <div class="rounded-xl border border-slate-200 bg-white p-5 lg:col-span-2">
+          <div class="flex items-center justify-between">
+            <div>
+              <h2 class="text-base font-semibold">CA mensuel — Budget 2026 par marque</h2>
+              <p class="text-xs text-slate-500">Empilement par marque · 12 mois</p>
+            </div>
+          </div>
+          <div class="mt-4 h-72">
+            <canvas id="chart-monthly"></canvas>
+          </div>
+        </div>
+        <div class="rounded-xl border border-slate-200 bg-white p-5">
+          <h2 class="text-base font-semibold">Mix marques (CA Budget total)</h2>
+          <p class="text-xs text-slate-500">Part de chaque marque dans le CA</p>
+          <div class="mt-4 h-72">
+            <canvas id="chart-mix"></canvas>
+          </div>
+        </div>
+      </section>
+
+      <!-- Top models -->
+      <section class="mb-5 rounded-xl border border-slate-200 bg-white p-5">
+        <h2 class="text-base font-semibold">Top 15 modèles par CA Budget total</h2>
+        <p class="text-xs text-slate-500">Toutes marques confondues</p>
+        <div class="mt-4 h-96">
+          <canvas id="chart-top-models"></canvas>
+        </div>
+      </section>
+
+      <!-- Brand performance table -->
+      <section class="mb-5 rounded-xl border border-slate-200 bg-white">
+        <div class="flex items-center justify-between border-b border-slate-200 px-5 py-3">
+          <h2 class="text-base font-semibold">Performance par marque</h2>
+          <button
+            id="btn-export-brand"
+            class="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs hover:bg-slate-50"
+          >
+            Export CSV
+          </button>
+        </div>
+        <div class="overflow-x-auto scrollbar-thin">
+          <table class="w-full text-sm">
+            <thead
+              class="bg-slate-50 text-xs font-semibold uppercase tracking-wider text-slate-600"
+            >
+              <tr>
+                <th class="px-4 py-3 text-left">Marque</th>
+                <th class="px-4 py-3 text-right">Modèles</th>
+                <th class="px-4 py-3 text-right">Volume Budget</th>
+                <th class="px-4 py-3 text-right">CA Budget</th>
+                <th class="px-4 py-3 text-right">Coût Budget</th>
+                <th class="px-4 py-3 text-right">Marge Budget</th>
+                <th class="px-4 py-3 text-right">Tx marge</th>
+                <th class="px-4 py-3 text-right">Part CA</th>
+              </tr>
+            </thead>
+            <tbody id="brand-table-body" class="divide-y divide-slate-100"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Detail records table -->
+      <section class="mb-5 rounded-xl border border-slate-200 bg-white">
+        <div
+          class="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-5 py-3"
+        >
+          <div>
+            <h2 class="text-base font-semibold">Détail des enregistrements</h2>
+            <p class="text-xs text-slate-500">
+              <span id="detail-count">—</span> records · pagination 50 par page
+            </p>
+          </div>
+          <div class="flex items-center gap-2">
+            <input
+              id="search-input"
+              type="search"
+              placeholder="Rechercher modèle, marque…"
+              class="w-64 rounded-lg border border-slate-300 px-3 py-1.5 text-sm"
+            />
+            <select
+              id="filter-indicator"
+              class="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm"
+            >
+              <option value="ALL">Tous indicateurs</option>
+              <option value="UNITES">UNITES</option>
+              <option value="CA">CA</option>
+              <option value="REVIENT">REVIENT</option>
+              <option value="MARGES">MARGES</option>
+            </select>
+            <button
+              id="btn-export-detail"
+              class="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs hover:bg-slate-50"
+            >
+              Export CSV
+            </button>
+          </div>
+        </div>
+        <div class="overflow-x-auto scrollbar-thin">
+          <table class="w-full text-sm">
+            <thead
+              class="bg-slate-50 text-xs font-semibold uppercase tracking-wider text-slate-600"
+            >
+              <tr>
+                <th class="px-4 py-2 text-left">Marque</th>
+                <th class="px-4 py-2 text-left">Modèle</th>
+                <th class="px-4 py-2 text-left">Période</th>
+                <th class="px-4 py-2 text-left">Indicateur</th>
+                <th class="px-4 py-2 text-left">Scénario</th>
+                <th class="px-4 py-2 text-right">Valeur</th>
+                <th class="px-4 py-2 text-left">Source</th>
+              </tr>
+            </thead>
+            <tbody id="detail-table-body" class="divide-y divide-slate-100"></tbody>
+          </table>
+        </div>
+        <div class="flex items-center justify-between border-t border-slate-200 px-5 py-3">
+          <button
+            id="prev-page"
+            class="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm disabled:opacity-50"
+          >
+            ← Préc.
+          </button>
+          <span class="text-xs text-slate-500">
+            Page <span id="current-page">1</span> / <span id="total-pages">1</span>
+          </span>
+          <button
+            id="next-page"
+            class="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm disabled:opacity-50"
+          >
+            Suiv. →
+          </button>
+        </div>
+      </section>
+
+      <footer
+        class="mt-10 rounded-xl border border-amber-200 bg-amber-50 p-4 text-xs text-amber-900"
+      >
+        <strong>Données locales privées.</strong> Ce dashboard contient les valeurs réelles de ton
+        budget extraites par le parser. Le fichier <code>scripts/.local/dashboard.html</code> est
+        gitignoré et ne quitte pas ta machine. Pour le régénérer après modification du budget Excel,
+        relance <code>uv run scripts/build-local-dashboard.py</code>.
+      </footer>
+    </main>
+
+    <script>
+      // ===================================================================
+      // Bootstrap from embedded JSON
+      // ===================================================================
+      const records = JSON.parse(document.getElementById('budget-data').textContent);
+      const meta = JSON.parse(document.getElementById('build-meta').textContent);
+
+      document.getElementById('source-file').textContent = meta.source_file || '—';
+      document.getElementById('build-date').textContent = meta.build_date || '—';
+      document.getElementById('kpi-records').textContent = records.length.toLocaleString('fr-FR');
+
+      const uniqueModels = new Set(records.map((r) => `${r.brand}|${r.model}`));
+      document.getElementById('kpi-models').textContent = uniqueModels.size;
+
+      let totalAnomalies = 0;
+      for (const m of meta.brand_meta || []) totalAnomalies += (m.anomalies || []).length;
+      document.getElementById('kpi-anomalies').textContent = totalAnomalies;
+
+      // Brand colors
+      const BRAND_COLORS = {
+        VW: '#2563eb',
+        GW: '#dc2626',
+        CHERY: '#f59e0b',
+        LOVOL: '#10b981',
+        SINOTRUK: '#ea580c',
+        SEALAND: '#0891b2',
+        MOTOS: '#7c3aed',
+      };
+      const COLOR_FALLBACK = '#94a3b8';
+      const colorOf = (b) => BRAND_COLORS[b] || COLOR_FALLBACK;
+
+      // Months list
+      const MONTHS_FR = [
+        'Jan',
+        'Fév',
+        'Mar',
+        'Avr',
+        'Mai',
+        'Juin',
+        'Juil',
+        'Août',
+        'Sep',
+        'Oct',
+        'Nov',
+        'Déc',
+      ];
+      const monthOf = (period) => {
+        const m = period.match(/^2026-(\d{2})$/);
+        return m ? parseInt(m[1], 10) : null;
+      };
+
+      // ===================================================================
+      // Filters & state
+      // ===================================================================
+      const state = {
+        brand: 'ALL',
+        period: '2026-monthly', // monthly = all 12 months
+        view: 'VALUE',
+        indicator: 'ALL',
+        search: '',
+        page: 1,
+        pageSize: 50,
+      };
+
+      // Populate brand filter
+      const brands = [...new Set(records.map((r) => r.brand))].sort();
+      const brandSelect = document.getElementById('filter-brand');
+      for (const b of brands) {
+        const opt = document.createElement('option');
+        opt.value = b;
+        opt.textContent = b;
+        brandSelect.appendChild(opt);
+      }
+
+      // ===================================================================
+      // Filter helpers
+      // ===================================================================
+      function periodMatches(periodCode, filterValue) {
+        if (filterValue === 'ALL') return true;
+        if (filterValue === '2026-monthly') return /^2026-\d{2}$/.test(periodCode);
+        return periodCode === filterValue;
+      }
+
+      function isMonthly(periodCode) {
+        return /^2026-\d{2}$/.test(periodCode);
+      }
+
+      function isS1Budget(periodCode) {
+        // For monthly Jan-Jun, also count S1 budget
+        if (periodCode === '2026-S1-budget') return true;
+        const m = monthOf(periodCode);
+        return m !== null && m >= 1 && m <= 6;
+      }
+
+      function applyBrandFilter(rs) {
+        return state.brand === 'ALL' ? rs : rs.filter((r) => r.brand === state.brand);
+      }
+
+      // For KPI: prefer monthly when period filter is monthly, else use the explicit filter
+      function rowsForKPI() {
+        let rs = applyBrandFilter(records);
+        if (state.period === '2026-monthly') {
+          rs = rs.filter((r) => /^2026-\d{2}$/.test(r.period_code));
+        } else if (state.period === 'ALL') {
+          rs = rs.filter((r) => /^2026-\d{2}$/.test(r.period_code)); // default to monthly to avoid double-count
+        } else {
+          rs = rs.filter((r) => r.period_code === state.period);
+        }
+        return rs;
+      }
+
+      // ===================================================================
+      // Number formatting
+      // ===================================================================
+      function fmtNum(v, divisor = 1, suffix = '') {
+        if (v === null || v === undefined || Number.isNaN(v)) return '—';
+        const n = v / divisor;
+        const formatted =
+          Math.abs(n) >= 1000
+            ? n.toLocaleString('fr-FR', { maximumFractionDigits: 0 })
+            : n.toLocaleString('fr-FR', { maximumFractionDigits: 2 });
+        return formatted + suffix;
+      }
+
+      function fmtCurrency(v) {
+        const view = state.view;
+        if (view === 'MILLION') return fmtNum(v, 1_000_000, ' M');
+        if (view === 'THOUSAND') return fmtNum(v, 1_000, ' k');
+        return fmtNum(v) + ' FCFA';
+      }
+
+      // ===================================================================
+      // Aggregations
+      // ===================================================================
+      function sumIndicator(rs, indicator) {
+        let s = 0;
+        for (const r of rs) {
+          if (r.indicator === indicator && typeof r.value === 'number') s += r.value;
+        }
+        return s;
+      }
+
+      function aggByBrand(rs) {
+        const map = {};
+        for (const r of rs) {
+          if (!map[r.brand]) {
+            map[r.brand] = {
+              brand: r.brand,
+              models: new Set(),
+              units: 0,
+              ca: 0,
+              cost: 0,
+              marge: 0,
+            };
+          }
+          map[r.brand].models.add(r.model);
+          if (typeof r.value === 'number') {
+            if (r.indicator === 'UNITES') map[r.brand].units += r.value;
+            else if (r.indicator === 'CA') map[r.brand].ca += r.value;
+            else if (r.indicator === 'REVIENT') map[r.brand].cost += r.value;
+            else if (r.indicator === 'MARGES') map[r.brand].marge += r.value;
+          }
+        }
+        return Object.values(map)
+          .map((b) => ({ ...b, models: b.models.size }))
+          .sort((a, b) => b.ca - a.ca);
+      }
+
+      function aggByModel(rs, indicator) {
+        const map = {};
+        for (const r of rs) {
+          if (r.indicator !== indicator) continue;
+          const k = `${r.brand}|${r.model}`;
+          if (!map[k]) map[k] = { brand: r.brand, model: r.model, total: 0 };
+          if (typeof r.value === 'number') map[k].total += r.value;
+        }
+        return Object.values(map).sort((a, b) => b.total - a.total);
+      }
+
+      function aggMonthly(rs, indicator) {
+        const grid = {}; // grid[brand][month-1] = sum
+        for (const r of rs) {
+          if (r.indicator !== indicator) continue;
+          const m = monthOf(r.period_code);
+          if (m === null) continue;
+          if (!grid[r.brand]) grid[r.brand] = new Array(12).fill(0);
+          if (typeof r.value === 'number') grid[r.brand][m - 1] += r.value;
+        }
+        return grid;
+      }
+
+      // ===================================================================
+      // Render — KPIs
+      // ===================================================================
+      function renderKPIs() {
+        const rs = rowsForKPI();
+        const ca = sumIndicator(rs, 'CA');
+        const units = sumIndicator(rs, 'UNITES');
+        const cost = sumIndicator(rs, 'REVIENT');
+        const marge = sumIndicator(rs, 'MARGES');
+        const margeRate = ca > 0 ? (marge / ca) * 100 : 0;
+
+        document.getElementById('kpi-ca').textContent = fmtCurrency(ca);
+        document.getElementById('kpi-volume').textContent = units.toLocaleString('fr-FR');
+        document.getElementById('kpi-marge').textContent = fmtCurrency(marge);
+        document.getElementById('kpi-marge-rate').textContent = margeRate.toFixed(1) + ' %';
+
+        const periodLabel =
+          state.period === '2026-monthly'
+            ? 'Cumul 12 mois 2026'
+            : state.period === 'ALL'
+              ? 'Toutes périodes (mensuel)'
+              : state.period;
+        document.getElementById('kpi-ca-period').textContent = periodLabel;
+      }
+
+      // ===================================================================
+      // Render — Charts
+      // ===================================================================
+      let chartMonthly, chartMix, chartTopModels;
+
+      function renderChartMonthly() {
+        const rs = applyBrandFilter(records);
+        const grid = aggMonthly(rs, 'CA');
+        const datasets = Object.entries(grid).map(([brand, vals]) => ({
+          label: brand,
+          data: vals,
+          backgroundColor: colorOf(brand),
+        }));
+
+        if (chartMonthly) chartMonthly.destroy();
+        chartMonthly = new Chart(document.getElementById('chart-monthly'), {
+          type: 'bar',
+          data: { labels: MONTHS_FR, datasets },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+              legend: { position: 'bottom', labels: { boxWidth: 10, font: { size: 11 } } },
+              tooltip: {
+                callbacks: {
+                  label: (ctx) => `${ctx.dataset.label}: ${fmtCurrency(ctx.parsed.y)}`,
+                },
+              },
+            },
+            scales: {
+              x: { stacked: true, ticks: { color: '#64748b' }, grid: { display: false } },
+              y: {
+                stacked: true,
+                ticks: {
+                  callback: (v) =>
+                    fmtNum(
+                      v,
+                      state.view === 'MILLION' ? 1_000_000 : state.view === 'THOUSAND' ? 1_000 : 1,
+                    ),
+                  color: '#64748b',
+                },
+                grid: { color: '#f1f5f9' },
+              },
+            },
+          },
+        });
+      }
+
+      function renderChartMix() {
+        const rs = rowsForKPI();
+        const aggs = aggByBrand(rs);
+        const labels = aggs.map((a) => a.brand);
+        const values = aggs.map((a) => a.ca);
+        const colors = labels.map(colorOf);
+
+        if (chartMix) chartMix.destroy();
+        chartMix = new Chart(document.getElementById('chart-mix'), {
+          type: 'doughnut',
+          data: {
+            labels,
+            datasets: [
+              { data: values, backgroundColor: colors, borderWidth: 2, borderColor: '#fff' },
+            ],
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            cutout: '55%',
+            plugins: {
+              legend: { position: 'right', labels: { boxWidth: 10, font: { size: 11 } } },
+              tooltip: {
+                callbacks: {
+                  label: (ctx) => {
+                    const total = values.reduce((a, b) => a + b, 0);
+                    const pct = total > 0 ? ((ctx.parsed / total) * 100).toFixed(1) : '0';
+                    return `${ctx.label}: ${fmtCurrency(ctx.parsed)} (${pct} %)`;
+                  },
+                },
+              },
+            },
+          },
+        });
+      }
+
+      function renderChartTopModels() {
+        const rs = rowsForKPI();
+        const top = aggByModel(rs, 'CA').slice(0, 15).reverse(); // reverse for horizontal bar order
+
+        if (chartTopModels) chartTopModels.destroy();
+        chartTopModels = new Chart(document.getElementById('chart-top-models'), {
+          type: 'bar',
+          data: {
+            labels: top.map((t) => `${t.model} (${t.brand})`),
+            datasets: [
+              {
+                data: top.map((t) => t.total),
+                backgroundColor: top.map((t) => colorOf(t.brand)),
+              },
+            ],
+          },
+          options: {
+            indexAxis: 'y',
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+              legend: { display: false },
+              tooltip: { callbacks: { label: (ctx) => fmtCurrency(ctx.parsed.x) } },
+            },
+            scales: {
+              x: {
+                ticks: {
+                  callback: (v) =>
+                    fmtNum(
+                      v,
+                      state.view === 'MILLION' ? 1_000_000 : state.view === 'THOUSAND' ? 1_000 : 1,
+                    ),
+                  color: '#64748b',
+                },
+                grid: { color: '#f1f5f9' },
+              },
+              y: { ticks: { color: '#1e293b', font: { size: 10 } }, grid: { display: false } },
+            },
+          },
+        });
+      }
+
+      // ===================================================================
+      // Render — Brand table
+      // ===================================================================
+      function renderBrandTable() {
+        const rs = rowsForKPI();
+        const aggs = aggByBrand(rs);
+        const totalCA = aggs.reduce((s, a) => s + a.ca, 0);
+
+        const tbody = document.getElementById('brand-table-body');
+        tbody.innerHTML = '';
+        for (const a of aggs) {
+          const tr = document.createElement('tr');
+          tr.className = 'hover:bg-slate-50';
+          const margeRate = a.ca > 0 ? ((a.marge / a.ca) * 100).toFixed(1) + ' %' : '—';
+          const partCA = totalCA > 0 ? ((a.ca / totalCA) * 100).toFixed(1) + ' %' : '—';
+          tr.innerHTML = `
+            <td class="px-4 py-2"><span class="inline-block h-2 w-2 rounded-full mr-2" style="background:${colorOf(a.brand)}"></span><span class="font-medium">${a.brand}</span></td>
+            <td class="px-4 py-2 text-right num">${a.models}</td>
+            <td class="px-4 py-2 text-right num">${a.units.toLocaleString('fr-FR')}</td>
+            <td class="px-4 py-2 text-right num font-medium">${fmtCurrency(a.ca)}</td>
+            <td class="px-4 py-2 text-right num text-slate-600">${fmtCurrency(a.cost)}</td>
+            <td class="px-4 py-2 text-right num">${fmtCurrency(a.marge)}</td>
+            <td class="px-4 py-2 text-right num text-emerald-700">${margeRate}</td>
+            <td class="px-4 py-2 text-right num">${partCA}</td>
+          `;
+          tbody.appendChild(tr);
+        }
+      }
+
+      // ===================================================================
+      // Render — Detail table (paginated, searchable)
+      // ===================================================================
+      function getFilteredDetailRows() {
+        let rs = applyBrandFilter(records);
+        if (state.period !== 'ALL' && state.period !== '2026-monthly') {
+          rs = rs.filter((r) => r.period_code === state.period);
+        } else if (state.period === '2026-monthly') {
+          rs = rs.filter((r) => /^2026-\d{2}$/.test(r.period_code));
+        }
+        if (state.indicator !== 'ALL') rs = rs.filter((r) => r.indicator === state.indicator);
+        if (state.search) {
+          const q = state.search.toLowerCase();
+          rs = rs.filter(
+            (r) => r.brand.toLowerCase().includes(q) || r.model.toLowerCase().includes(q),
+          );
+        }
+        return rs;
+      }
+
+      function renderDetailTable() {
+        const rs = getFilteredDetailRows();
+        document.getElementById('detail-count').textContent = rs.length.toLocaleString('fr-FR');
+
+        const totalPages = Math.max(1, Math.ceil(rs.length / state.pageSize));
+        if (state.page > totalPages) state.page = totalPages;
+        document.getElementById('current-page').textContent = state.page;
+        document.getElementById('total-pages').textContent = totalPages;
+        document.getElementById('prev-page').disabled = state.page <= 1;
+        document.getElementById('next-page').disabled = state.page >= totalPages;
+
+        const start = (state.page - 1) * state.pageSize;
+        const slice = rs.slice(start, start + state.pageSize);
+
+        const tbody = document.getElementById('detail-table-body');
+        tbody.innerHTML = '';
+        for (const r of slice) {
+          const tr = document.createElement('tr');
+          tr.className = 'hover:bg-slate-50';
+          const valStr =
+            r.indicator === 'UNITES'
+              ? Number(r.value).toLocaleString('fr-FR')
+              : fmtCurrency(r.value);
+          tr.innerHTML = `
+            <td class="px-4 py-1.5"><span class="inline-block h-2 w-2 rounded-full mr-2" style="background:${colorOf(r.brand)}"></span>${r.brand}</td>
+            <td class="px-4 py-1.5">${r.model}</td>
+            <td class="px-4 py-1.5"><code class="text-xs text-slate-600">${r.period_code}</code></td>
+            <td class="px-4 py-1.5"><span class="rounded bg-slate-100 px-1.5 py-0.5 text-xs">${r.indicator}</span></td>
+            <td class="px-4 py-1.5 text-xs text-slate-500">${r.scenario}</td>
+            <td class="px-4 py-1.5 text-right num">${valStr}</td>
+            <td class="px-4 py-1.5 text-xs text-slate-400">${r.source_sheet}!${r.source_cell}</td>
+          `;
+          tbody.appendChild(tr);
+        }
+      }
+
+      // ===================================================================
+      // CSV export
+      // ===================================================================
+      function downloadCSV(filename, rows) {
+        if (rows.length === 0) return;
+        const headers = Object.keys(rows[0]);
+        const escape = (v) => {
+          const s = String(v ?? '');
+          return s.includes(',') || s.includes('"') || s.includes('\n')
+            ? '"' + s.replace(/"/g, '""') + '"'
+            : s;
+        };
+        const csv =
+          headers.join(',') +
+          '\n' +
+          rows.map((r) => headers.map((h) => escape(r[h])).join(',')).join('\n');
+        const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        a.click();
+        URL.revokeObjectURL(url);
+      }
+
+      // ===================================================================
+      // Wire up events
+      // ===================================================================
+      function renderAll() {
+        renderKPIs();
+        renderChartMonthly();
+        renderChartMix();
+        renderChartTopModels();
+        renderBrandTable();
+        renderDetailTable();
+      }
+
+      document.getElementById('filter-brand').addEventListener('change', (e) => {
+        state.brand = e.target.value;
+        state.page = 1;
+        renderAll();
+      });
+      document.getElementById('filter-period').addEventListener('change', (e) => {
+        state.period = e.target.value;
+        state.page = 1;
+        renderAll();
+      });
+      document.getElementById('filter-view').addEventListener('change', (e) => {
+        state.view = e.target.value;
+        renderAll();
+      });
+      document.getElementById('filter-indicator').addEventListener('change', (e) => {
+        state.indicator = e.target.value;
+        state.page = 1;
+        renderDetailTable();
+      });
+      document.getElementById('search-input').addEventListener('input', (e) => {
+        state.search = e.target.value;
+        state.page = 1;
+        renderDetailTable();
+      });
+      document.getElementById('prev-page').addEventListener('click', () => {
+        state.page--;
+        renderDetailTable();
+      });
+      document.getElementById('next-page').addEventListener('click', () => {
+        state.page++;
+        renderDetailTable();
+      });
+      document.getElementById('btn-export-detail').addEventListener('click', () => {
+        downloadCSV('budget-detail.csv', getFilteredDetailRows());
+      });
+      document.getElementById('btn-export-brand').addEventListener('click', () => {
+        const rs = rowsForKPI();
+        const aggs = aggByBrand(rs).map((a) => ({
+          brand: a.brand,
+          models: a.models,
+          units: a.units,
+          ca_xof: a.ca,
+          cost_xof: a.cost,
+          marge_xof: a.marge,
+          marge_rate_pct: a.ca > 0 ? ((a.marge / a.ca) * 100).toFixed(2) : '',
+        }));
+        downloadCSV('budget-brand-summary.csv', aggs);
+      });
+
+      // Initial render
+      renderAll();
+    </script>
+  </body>
+</html>

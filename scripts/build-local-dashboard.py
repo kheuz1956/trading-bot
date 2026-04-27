@@ -36,6 +36,8 @@ PARSER_OUTPUT = REPO_ROOT / "scripts" / ".local" / "parsed-budget.json"
 META_OUTPUT = REPO_ROOT / "scripts" / ".local" / "parsed-budget.meta.json"
 SAV_OUTPUT = REPO_ROOT / "scripts" / ".local" / "parsed-sav.json"
 SAV_META_OUTPUT = REPO_ROOT / "scripts" / ".local" / "parsed-sav.meta.json"
+CPT_OUTPUT = REPO_ROOT / "scripts" / ".local" / "parsed-cpt-expl.json"
+CPT_META_OUTPUT = REPO_ROOT / "scripts" / ".local" / "parsed-cpt-expl.meta.json"
 
 
 def run_parser(src: Path) -> tuple[list[dict], list[dict]]:
@@ -101,11 +103,47 @@ def run_sav_parser(src: Path) -> tuple[list[dict], list[dict]]:
     return records, sav_meta
 
 
+def run_cpt_parser(src: Path) -> tuple[list[dict], list[dict]]:
+    """Run the CPT EXPL parser script, return (records, cpt_meta). Soft-fails."""
+    parser_script = REPO_ROOT / "scripts" / "parse-cpt-expl.py"
+    if not parser_script.exists():
+        print("CPT EXPL parser script not found — skipping section.")
+        return [], []
+    print(f"Running CPT EXPL parser on {src.name}...")
+
+    CPT_OUTPUT.parent.mkdir(parents=True, exist_ok=True)
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(parser_script),
+            "--input",
+            str(src),
+            "--output",
+            str(CPT_OUTPUT),
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    if result.returncode != 0:
+        print(f"CPT EXPL parser failed (non-fatal):\n{result.stderr}", file=sys.stderr)
+        return [], []
+    print(result.stdout)
+
+    records = json.loads(CPT_OUTPUT.read_text(encoding="utf-8")) if CPT_OUTPUT.exists() else []
+    cpt_meta = (
+        json.loads(CPT_META_OUTPUT.read_text(encoding="utf-8")) if CPT_META_OUTPUT.exists() else []
+    )
+    return records, cpt_meta
+
+
 def build_dashboard(
     records: list[dict],
     brand_meta: list[dict],
     sav_records: list[dict],
     sav_meta: list[dict],
+    cpt_records: list[dict],
+    cpt_meta: list[dict],
     src: Path,
     out: Path,
 ) -> None:
@@ -120,19 +158,23 @@ def build_dashboard(
         "build_date": dt.datetime.now().strftime("%Y-%m-%d %H:%M"),
         "record_count": len(records),
         "sav_record_count": len(sav_records),
+        "cpt_record_count": len(cpt_records),
         "brand_meta": brand_meta,
         "sav_meta": sav_meta,
+        "cpt_meta": cpt_meta,
     }
 
     # Use compact JSON to keep file size reasonable
     data_json = json.dumps(records, separators=(",", ":"), ensure_ascii=False)
     sav_json = json.dumps(sav_records, separators=(",", ":"), ensure_ascii=False)
+    cpt_json = json.dumps(cpt_records, separators=(",", ":"), ensure_ascii=False)
     meta_json = json.dumps(meta, separators=(",", ":"), ensure_ascii=False, default=str)
 
     # Replace placeholders.
     populated = (
         template_html.replace("__DATA__", data_json)
         .replace("__SAV_DATA__", sav_json)
+        .replace("__CPT_DATA__", cpt_json)
         .replace("__META__", meta_json)
     )
 
@@ -144,6 +186,7 @@ def build_dashboard(
     print(f"  Size: {size_kb:,.1f} KB")
     print(f"  VN records embedded:  {len(records):,}")
     print(f"  SAV records embedded: {len(sav_records):,}")
+    print(f"  CPT records embedded: {len(cpt_records):,}")
     print(f"  Open in browser: file:///{out.as_posix()}")
 
 
@@ -160,7 +203,17 @@ def main() -> int:
 
     records, brand_meta = run_parser(src)
     sav_records, sav_meta = run_sav_parser(src)
-    build_dashboard(records, brand_meta, sav_records, sav_meta, src, Path(args.output))
+    cpt_records, cpt_meta = run_cpt_parser(src)
+    build_dashboard(
+        records,
+        brand_meta,
+        sav_records,
+        sav_meta,
+        cpt_records,
+        cpt_meta,
+        src,
+        Path(args.output),
+    )
     return 0
 
 

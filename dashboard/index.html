@@ -35,6 +35,9 @@
     <script id="sav-data" type="application/json">
       __SAV_DATA__
     </script>
+    <script id="cpt-data" type="application/json">
+      __CPT_DATA__
+    </script>
     <script id="build-meta" type="application/json">
       __META__
     </script>
@@ -264,6 +267,116 @@
           >
             Suiv. →
           </button>
+        </div>
+      </section>
+
+      <!-- ============================================================ -->
+      <!-- Section CPT EXPL — Compte d'Exploitation (P&L)               -->
+      <!-- ============================================================ -->
+      <section
+        class="mt-10 mb-5 rounded-xl border-2 border-indigo-200 bg-indigo-50/40 p-5"
+        id="cpt-section"
+      >
+        <div class="mb-4 flex items-center justify-between">
+          <div>
+            <h2 class="text-xl font-bold text-indigo-900">
+              Compte d'Exploitation — vue consolidée P&amp;L
+            </h2>
+            <p class="text-xs text-indigo-700">
+              Source : feuille CPT EXPL — <span id="cpt-record-count">—</span> records
+            </p>
+          </div>
+        </div>
+
+        <!-- KPI cards CPT -->
+        <div class="grid grid-cols-2 gap-3 sm:grid-cols-5">
+          <div class="rounded-lg border border-indigo-200 bg-white p-3">
+            <p class="text-xs font-medium text-slate-500">Ventes 2026</p>
+            <p class="mt-1 text-lg font-bold num text-emerald-700" id="cpt-kpi-ventes">—</p>
+          </div>
+          <div class="rounded-lg border border-indigo-200 bg-white p-3">
+            <p class="text-xs font-medium text-slate-500">Achats 2026</p>
+            <p class="mt-1 text-lg font-bold num text-rose-700" id="cpt-kpi-achats">—</p>
+          </div>
+          <div class="rounded-lg border border-indigo-200 bg-white p-3">
+            <p class="text-xs font-medium text-slate-500">Personnel 2026</p>
+            <p class="mt-1 text-lg font-bold num text-amber-700" id="cpt-kpi-personnel">—</p>
+          </div>
+          <div class="rounded-lg border border-indigo-200 bg-white p-3">
+            <p class="text-xs font-medium text-slate-500">Frais généraux 2026</p>
+            <p class="mt-1 text-lg font-bold num text-amber-700" id="cpt-kpi-frais">—</p>
+          </div>
+          <div class="rounded-lg border border-indigo-200 bg-white p-3">
+            <p class="text-xs font-medium text-slate-500">Résultat 2026</p>
+            <p class="mt-1 text-lg font-bold num" id="cpt-kpi-resultat">—</p>
+          </div>
+        </div>
+
+        <!-- Variance Budget vs Réalisé S1 -->
+        <div class="mt-4 rounded-lg border border-indigo-200 bg-white p-4">
+          <div class="flex items-center justify-between">
+            <div>
+              <h3 class="text-sm font-semibold">Variance Budget S1 vs Réalisé S1</h3>
+              <p class="text-xs text-slate-500">
+                Écart par section · positif = favorable, négatif = défavorable
+              </p>
+            </div>
+          </div>
+          <div class="mt-3 overflow-x-auto scrollbar-thin">
+            <table class="w-full text-sm">
+              <thead
+                class="bg-slate-50 text-xs font-semibold uppercase tracking-wide text-slate-600"
+              >
+                <tr>
+                  <th class="px-4 py-2 text-left">Section</th>
+                  <th class="px-4 py-2 text-right">Budget S1</th>
+                  <th class="px-4 py-2 text-right">Réalisé S1</th>
+                  <th class="px-4 py-2 text-right">Écart</th>
+                  <th class="px-4 py-2 text-right">% Écart</th>
+                  <th class="px-4 py-2 text-center">Statut</th>
+                </tr>
+              </thead>
+              <tbody id="cpt-variance-body" class="divide-y divide-slate-100"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Monthly P&L chart -->
+        <div class="mt-4 rounded-lg border border-indigo-200 bg-white p-4">
+          <h3 class="text-sm font-semibold">Évolution mensuelle 2026 par section (Budget)</h3>
+          <div class="mt-2 h-72">
+            <canvas id="chart-cpt-monthly"></canvas>
+          </div>
+        </div>
+
+        <!-- Postes table -->
+        <div class="mt-4 rounded-lg border border-indigo-200 bg-white">
+          <div class="flex items-center justify-between border-b border-indigo-200 px-4 py-2">
+            <h3 class="text-sm font-semibold">Détail des postes (top 30 par |Total 2026|)</h3>
+            <select
+              id="cpt-section-filter"
+              class="rounded border border-slate-300 bg-white px-2 py-1 text-xs"
+            >
+              <option value="ALL">Toutes sections</option>
+            </select>
+          </div>
+          <div class="overflow-x-auto scrollbar-thin">
+            <table class="w-full text-sm">
+              <thead
+                class="bg-slate-50 text-xs font-semibold uppercase tracking-wide text-slate-600"
+              >
+                <tr>
+                  <th class="px-4 py-2 text-left">Poste</th>
+                  <th class="px-4 py-2 text-left">Section</th>
+                  <th class="px-4 py-2 text-right">Budget S1</th>
+                  <th class="px-4 py-2 text-right">Réalisé S1</th>
+                  <th class="px-4 py-2 text-right">Budget S2</th>
+                  <th class="px-4 py-2 text-right">Total 2026</th>
+                </tr>
+              </thead>
+              <tbody id="cpt-table-body" class="divide-y divide-slate-100"></tbody>
+            </table>
+          </div>
         </div>
       </section>
 
@@ -1071,6 +1184,279 @@
 
       // Initial SAV render
       renderSAV();
+
+      // ===================================================================
+      // CPT EXPL section — Compte d'Exploitation (P&L)
+      // ===================================================================
+      let cptRecords = [];
+      try {
+        const cptText = document.getElementById('cpt-data')?.textContent?.trim() ?? '';
+        if (cptText && cptText !== '__CPT_DATA__') {
+          cptRecords = JSON.parse(cptText);
+        }
+      } catch (e) {
+        console.warn('CPT EXPL data not available:', e);
+      }
+      document.getElementById('cpt-record-count').textContent =
+        cptRecords.length.toLocaleString('fr-FR');
+
+      const SECTION_COLORS = {
+        VENTES: '#10b981',
+        ACHATS: '#ef4444',
+        PERSONNEL: '#f59e0b',
+        FRAIS_GENERAUX: '#a855f7',
+        IMPOTS: '#0891b2',
+        MARGES: '#3b82f6',
+        RESULTAT: '#1e2761',
+        OTHER: '#94a3b8',
+      };
+
+      let cptSectionFilter = 'ALL';
+      let chartCptMonthly;
+
+      function cptSumBy(records, predicate) {
+        let s = 0;
+        for (const r of records) {
+          if (typeof r.value !== 'number') continue;
+          if (predicate(r)) s += r.value;
+        }
+        return s;
+      }
+
+      function cptIsMonthly(r) {
+        return /^2026-\d{2}$/.test(r.period_code);
+      }
+
+      function renderCptKPIs() {
+        const totalBy = (section) =>
+          cptSumBy(cptRecords, (r) => r.section === section && r.period_code === '2026-total');
+        // Fall back to S1+S2 if total missing
+        const totalOrSum = (section) => {
+          const t = totalBy(section);
+          if (t !== 0) return t;
+          return (
+            cptSumBy(
+              cptRecords,
+              (r) => r.section === section && r.period_code === '2026-S1-budget',
+            ) +
+            cptSumBy(cptRecords, (r) => r.section === section && r.period_code === '2026-S2-budget')
+          );
+        };
+
+        const ventes = totalOrSum('VENTES');
+        const achats = totalOrSum('ACHATS');
+        const personnel = totalOrSum('PERSONNEL');
+        const frais = totalOrSum('FRAIS_GENERAUX');
+        const resultat = totalOrSum('RESULTAT');
+
+        document.getElementById('cpt-kpi-ventes').textContent = fmtCurrency(ventes);
+        document.getElementById('cpt-kpi-achats').textContent = fmtCurrency(achats);
+        document.getElementById('cpt-kpi-personnel').textContent = fmtCurrency(personnel);
+        document.getElementById('cpt-kpi-frais').textContent = fmtCurrency(frais);
+        const resultatEl = document.getElementById('cpt-kpi-resultat');
+        resultatEl.textContent = fmtCurrency(resultat);
+        resultatEl.className =
+          'mt-1 text-lg font-bold num ' + (resultat >= 0 ? 'text-emerald-700' : 'text-rose-700');
+      }
+
+      function renderCptVariance() {
+        const sections = [
+          'VENTES',
+          'ACHATS',
+          'PERSONNEL',
+          'FRAIS_GENERAUX',
+          'IMPOTS',
+          'MARGES',
+          'RESULTAT',
+        ];
+        const tbody = document.getElementById('cpt-variance-body');
+        tbody.innerHTML = '';
+
+        for (const section of sections) {
+          const budget = cptSumBy(
+            cptRecords,
+            (r) => r.section === section && r.period_code === '2026-S1-budget',
+          );
+          const actual = cptSumBy(
+            cptRecords,
+            (r) => r.section === section && r.period_code === '2026-S1-actual',
+          );
+          if (budget === 0 && actual === 0) continue;
+
+          const variance = actual - budget;
+          // For revenue/result, positive variance is favorable
+          // For costs (achats, personnel, frais, impots), negative variance is favorable
+          const isCost = ['ACHATS', 'PERSONNEL', 'FRAIS_GENERAUX', 'IMPOTS'].includes(section);
+          const favorable = isCost ? variance < 0 : variance > 0;
+          const pct = budget !== 0 ? ((variance / Math.abs(budget)) * 100).toFixed(1) : '—';
+
+          const tr = document.createElement('tr');
+          tr.className = 'hover:bg-slate-50';
+          const statusBg = favorable
+            ? 'bg-emerald-100 text-emerald-700'
+            : 'bg-rose-100 text-rose-700';
+          const statusText = favorable ? '✓ Favorable' : '✗ Défavorable';
+          tr.innerHTML = `
+            <td class="px-4 py-2 font-medium">
+              <span class="inline-block h-2 w-2 rounded-full mr-2" style="background:${SECTION_COLORS[section] || '#94a3b8'}"></span>
+              ${section}
+            </td>
+            <td class="px-4 py-2 text-right num">${fmtCurrency(budget)}</td>
+            <td class="px-4 py-2 text-right num">${fmtCurrency(actual)}</td>
+            <td class="px-4 py-2 text-right num ${variance >= 0 ? 'text-emerald-700' : 'text-rose-700'}">${variance >= 0 ? '+' : ''}${fmtCurrency(variance)}</td>
+            <td class="px-4 py-2 text-right num">${pct}${pct !== '—' ? ' %' : ''}</td>
+            <td class="px-4 py-2 text-center"><span class="rounded ${statusBg} px-2 py-0.5 text-xs font-semibold">${statusText}</span></td>
+          `;
+          tbody.appendChild(tr);
+        }
+        if (tbody.children.length === 0) {
+          tbody.innerHTML =
+            '<tr><td colspan="6" class="px-4 py-4 text-center text-xs text-slate-400">Pas de données réalisées S1 disponibles</td></tr>';
+        }
+      }
+
+      function renderCptMonthlyChart() {
+        const sections = Object.keys(SECTION_COLORS).filter(
+          (s) => s !== 'OTHER' && s !== 'RESULTAT' && s !== 'MARGES',
+        );
+
+        const datasets = sections.map((section) => {
+          const data = new Array(12).fill(0);
+          for (const r of cptRecords) {
+            if (r.section !== section || typeof r.value !== 'number') continue;
+            const m = monthOf(r.period_code);
+            if (m === null) continue;
+            data[m - 1] += r.value;
+          }
+          return {
+            label: section,
+            data,
+            backgroundColor: SECTION_COLORS[section],
+            stack: ['VENTES'].includes(section) ? 'revenue' : 'cost',
+          };
+        });
+
+        if (chartCptMonthly) chartCptMonthly.destroy();
+        chartCptMonthly = new Chart(document.getElementById('chart-cpt-monthly'), {
+          type: 'bar',
+          data: { labels: MONTHS_FR, datasets },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+              legend: { position: 'bottom', labels: { boxWidth: 10, font: { size: 11 } } },
+              tooltip: {
+                callbacks: {
+                  label: (ctx) => `${ctx.dataset.label}: ${fmtCurrency(ctx.parsed.y)}`,
+                },
+              },
+            },
+            scales: {
+              x: { stacked: true, ticks: { color: '#64748b' }, grid: { display: false } },
+              y: {
+                stacked: true,
+                ticks: {
+                  callback: (v) =>
+                    fmtNum(
+                      v,
+                      state.view === 'MILLION' ? 1_000_000 : state.view === 'THOUSAND' ? 1_000 : 1,
+                    ),
+                  color: '#64748b',
+                },
+                grid: { color: '#f1f5f9' },
+              },
+            },
+          },
+        });
+      }
+
+      function renderCptTable() {
+        // Aggregate by poste with S1, S2, total, and monthly fallback
+        const aggByPoste = new Map();
+        for (const r of cptRecords) {
+          if (typeof r.value !== 'number') continue;
+          if (cptSectionFilter !== 'ALL' && r.section !== cptSectionFilter) continue;
+          const k = r.poste_label;
+          if (!aggByPoste.has(k)) {
+            aggByPoste.set(k, {
+              poste: r.poste_label,
+              section: r.section,
+              s1Budget: 0,
+              s1Actual: 0,
+              s2Budget: 0,
+              total: 0,
+              monthly: 0,
+            });
+          }
+          const a = aggByPoste.get(k);
+          if (r.period_code === '2026-S1-budget') a.s1Budget = r.value;
+          else if (r.period_code === '2026-S1-actual') a.s1Actual = r.value;
+          else if (r.period_code === '2026-S2-budget') a.s2Budget = r.value;
+          else if (r.period_code === '2026-total') a.total = r.value;
+          else if (cptIsMonthly(r)) a.monthly += r.value;
+        }
+        // Total fallback
+        for (const a of aggByPoste.values()) {
+          if (a.total === 0) a.total = a.s1Budget + a.s2Budget || a.monthly;
+        }
+
+        const sorted = [...aggByPoste.values()]
+          .filter((a) => a.total !== 0 || a.s1Budget !== 0 || a.s2Budget !== 0)
+          .sort((a, b) => Math.abs(b.total) - Math.abs(a.total))
+          .slice(0, 30);
+
+        const sectionBadge = {
+          VENTES: 'bg-emerald-100 text-emerald-700',
+          ACHATS: 'bg-rose-100 text-rose-700',
+          PERSONNEL: 'bg-amber-100 text-amber-700',
+          FRAIS_GENERAUX: 'bg-purple-100 text-purple-700',
+          IMPOTS: 'bg-cyan-100 text-cyan-700',
+          MARGES: 'bg-blue-100 text-blue-700',
+          RESULTAT: 'bg-indigo-100 text-indigo-700',
+          OTHER: 'bg-slate-100 text-slate-600',
+        };
+
+        const tbody = document.getElementById('cpt-table-body');
+        tbody.innerHTML = '';
+        for (const a of sorted) {
+          const tr = document.createElement('tr');
+          tr.className = 'hover:bg-slate-50';
+          const cls = sectionBadge[a.section] || 'bg-slate-100 text-slate-600';
+          tr.innerHTML = `
+            <td class="px-4 py-1.5 text-xs">${a.poste.length > 60 ? a.poste.slice(0, 60) + '…' : a.poste}</td>
+            <td class="px-4 py-1.5"><span class="rounded ${cls} px-2 py-0.5 text-[10px] font-semibold uppercase">${a.section}</span></td>
+            <td class="px-4 py-1.5 text-right num text-xs">${fmtCurrency(a.s1Budget)}</td>
+            <td class="px-4 py-1.5 text-right num text-xs ${a.s1Actual !== 0 ? '' : 'text-slate-300'}">${fmtCurrency(a.s1Actual)}</td>
+            <td class="px-4 py-1.5 text-right num text-xs">${fmtCurrency(a.s2Budget)}</td>
+            <td class="px-4 py-1.5 text-right num font-medium text-xs">${fmtCurrency(a.total)}</td>
+          `;
+          tbody.appendChild(tr);
+        }
+      }
+
+      function renderCpt() {
+        renderCptKPIs();
+        renderCptVariance();
+        renderCptMonthlyChart();
+        renderCptTable();
+      }
+
+      // Populate section filter
+      const cptSectionSelect = document.getElementById('cpt-section-filter');
+      const cptSections = [...new Set(cptRecords.map((r) => r.section))].sort();
+      for (const s of cptSections) {
+        const opt = document.createElement('option');
+        opt.value = s;
+        opt.textContent = s;
+        cptSectionSelect.appendChild(opt);
+      }
+      cptSectionSelect.addEventListener('change', (e) => {
+        cptSectionFilter = e.target.value;
+        renderCptTable();
+      });
+
+      // Initial render
+      renderCpt();
     </script>
   </body>
 </html>

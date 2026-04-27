@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DAF — Tableau d'écarts · Maquette</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      body {
+        font-family: 'Inter', system-ui, sans-serif;
+      }
+    </style>
+  </head>
+  <body class="bg-slate-50 text-slate-900">
+    <header class="border-b border-slate-200 bg-white">
+      <div class="mx-auto flex max-w-7xl items-center justify-between px-6 py-4">
+        <div class="flex items-center gap-3">
+          <a href="index.html" class="text-sm text-slate-500 hover:text-blue-600">← Retour</a>
+          <span class="text-slate-300">|</span>
+          <h1 class="text-lg font-semibold">Tableau d'écarts</h1>
+          <span class="rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700"
+            >DAF</span
+          >
+        </div>
+        <div class="flex items-center gap-3">
+          <button
+            class="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm hover:bg-slate-50"
+          >
+            Exporter PDF
+          </button>
+          <button
+            class="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm hover:bg-slate-50"
+          >
+            Exporter Excel
+          </button>
+          <div
+            class="flex h-9 w-9 items-center justify-center rounded-full bg-slate-200 text-sm font-medium"
+          >
+            CD
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <main class="mx-auto max-w-7xl px-6 py-6">
+      <!-- Filtres -->
+      <section
+        class="mb-5 flex flex-wrap items-center gap-3 rounded-xl border border-slate-200 bg-white p-4"
+      >
+        <div>
+          <label class="block text-xs font-medium text-slate-500">Période</label>
+          <select class="mt-1 rounded-lg border border-slate-300 px-3 py-1.5 text-sm">
+            <option>Avril 2026 (cumul YTD)</option>
+            <option>Mars 2026</option>
+            <option>FY2026</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-slate-500">Scénario budget</label>
+          <select class="mt-1 rounded-lg border border-slate-300 px-3 py-1.5 text-sm">
+            <option>Réaliste (BASE)</option>
+            <option>Optimiste</option>
+            <option>Pessimiste</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-slate-500">Marque</label>
+          <select class="mt-1 rounded-lg border border-slate-300 px-3 py-1.5 text-sm">
+            <option>Toutes</option>
+            <option>Volkswagen</option>
+            <option>Haval</option>
+            <option>Chery</option>
+            <option>Great Wall</option>
+            <option>SINOTRUK</option>
+            <option>Lovol</option>
+            <option>Sealands</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-slate-500">Seuil alerte</label>
+          <select class="mt-1 rounded-lg border border-slate-300 px-3 py-1.5 text-sm">
+            <option>± 5 %</option>
+            <option>± 10 %</option>
+            <option>± 15 %</option>
+          </select>
+        </div>
+        <div class="ml-auto flex items-end gap-2 text-xs text-slate-500">
+          <span class="flex items-center gap-1.5">
+            <span class="h-3 w-3 rounded bg-emerald-200"></span> Favorable
+          </span>
+          <span class="flex items-center gap-1.5">
+            <span class="h-3 w-3 rounded bg-amber-200"></span> Neutre
+          </span>
+          <span class="flex items-center gap-1.5">
+            <span class="h-3 w-3 rounded bg-rose-200"></span> Défavorable
+          </span>
+        </div>
+      </section>
+
+      <!-- KPI bar -->
+      <section class="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <div class="rounded-lg border border-slate-200 bg-white p-3">
+          <p class="text-xs text-slate-500">Total CA réalisé</p>
+          <p class="text-xl font-bold">8,42 Md</p>
+          <p class="text-xs text-emerald-600">+343 M FCFA vs budget</p>
+        </div>
+        <div class="rounded-lg border border-slate-200 bg-white p-3">
+          <p class="text-xs text-slate-500">Total marge brute</p>
+          <p class="text-xl font-bold">1,18 Md</p>
+          <p class="text-xs text-rose-600">−22 M FCFA vs budget</p>
+        </div>
+        <div class="rounded-lg border border-slate-200 bg-white p-3">
+          <p class="text-xs text-slate-500">Centres en alerte rouge</p>
+          <p class="text-xl font-bold text-rose-600">2 / 7</p>
+          <p class="text-xs text-slate-500">SINOTRUK, Chery</p>
+        </div>
+        <div class="rounded-lg border border-slate-200 bg-white p-3">
+          <p class="text-xs text-slate-500">Commentaires en attente</p>
+          <p class="text-xl font-bold text-amber-600">5</p>
+          <p class="text-xs text-slate-500">Écarts > 10 % non commentés</p>
+        </div>
+      </section>
+
+      <!-- Tableau d'écarts -->
+      <section class="overflow-x-auto rounded-xl border border-slate-200 bg-white">
+        <table class="w-full text-sm">
+          <thead class="bg-slate-50 text-xs font-semibold uppercase tracking-wider text-slate-600">
+            <tr>
+              <th class="px-4 py-3 text-left">Centre de profit</th>
+              <th class="px-4 py-3 text-right">Budget</th>
+              <th class="px-4 py-3 text-right">Réalisé</th>
+              <th class="px-4 py-3 text-right">Écart</th>
+              <th class="px-4 py-3 text-right">% Écart</th>
+              <th class="px-4 py-3 text-center">Heatmap</th>
+              <th class="px-4 py-3 text-left">Commentaire</th>
+              <th class="px-4 py-3"></th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-100">
+            <tr class="hover:bg-slate-50">
+              <td class="px-4 py-3">
+                <div class="flex items-center gap-2">
+                  <span class="h-2 w-2 rounded-full bg-blue-600"></span>
+                  <span class="font-medium">VN — Volkswagen</span>
+                </div>
+              </td>
+              <td class="px-4 py-3 text-right tabular-nums">3 240 M</td>
+              <td class="px-4 py-3 text-right tabular-nums font-medium">3 410 M</td>
+              <td class="px-4 py-3 text-right tabular-nums text-emerald-700">+170 M</td>
+              <td class="px-4 py-3 text-right tabular-nums">+5,2 %</td>
+              <td class="px-4 py-3"><div class="mx-auto h-6 w-16 rounded bg-emerald-200"></div></td>
+              <td class="px-4 py-3 text-xs text-slate-600">Mix Tiguan + Touareg porteur</td>
+              <td class="px-4 py-3"><button class="text-blue-600 hover:underline">→</button></td>
+            </tr>
+            <tr class="hover:bg-slate-50">
+              <td class="px-4 py-3">
+                <div class="flex items-center gap-2">
+                  <span class="h-2 w-2 rounded-full bg-rose-500"></span>
+                  <span class="font-medium">VN — Haval</span>
+                </div>
+              </td>
+              <td class="px-4 py-3 text-right tabular-nums">1 850 M</td>
+              <td class="px-4 py-3 text-right tabular-nums font-medium">2 020 M</td>
+              <td class="px-4 py-3 text-right tabular-nums text-emerald-700">+170 M</td>
+              <td class="px-4 py-3 text-right tabular-nums">+9,1 %</td>
+              <td class="px-4 py-3"><div class="mx-auto h-6 w-16 rounded bg-emerald-300"></div></td>
+              <td class="px-4 py-3 text-xs text-slate-600">H6 dépasse les prévisions</td>
+              <td class="px-4 py-3"><button class="text-blue-600 hover:underline">→</button></td>
+            </tr>
+            <tr class="hover:bg-slate-50">
+              <td class="px-4 py-3">
+                <div class="flex items-center gap-2">
+                  <span class="h-2 w-2 rounded-full bg-amber-500"></span>
+                  <span class="font-medium">VN — Chery</span>
+                </div>
+              </td>
+              <td class="px-4 py-3 text-right tabular-nums">1 250 M</td>
+              <td class="px-4 py-3 text-right tabular-nums font-medium">1 190 M</td>
+              <td class="px-4 py-3 text-right tabular-nums text-rose-700">−60 M</td>
+              <td class="px-4 py-3 text-right tabular-nums">−4,8 %</td>
+              <td class="px-4 py-3"><div class="mx-auto h-6 w-16 rounded bg-amber-200"></div></td>
+              <td class="px-4 py-3 text-xs text-amber-700 italic">⚠ À commenter</td>
+              <td class="px-4 py-3"><button class="text-blue-600 hover:underline">→</button></td>
+            </tr>
+            <tr class="hover:bg-slate-50">
+              <td class="px-4 py-3">
+                <div class="flex items-center gap-2">
+                  <span class="h-2 w-2 rounded-full bg-slate-400"></span>
+                  <span class="font-medium">VN — Great Wall</span>
+                </div>
+              </td>
+              <td class="px-4 py-3 text-right tabular-nums">920 M</td>
+              <td class="px-4 py-3 text-right tabular-nums font-medium">923 M</td>
+              <td class="px-4 py-3 text-right tabular-nums text-slate-500">+3 M</td>
+              <td class="px-4 py-3 text-right tabular-nums">+0,3 %</td>
+              <td class="px-4 py-3"><div class="mx-auto h-6 w-16 rounded bg-slate-200"></div></td>
+              <td class="px-4 py-3 text-xs text-slate-600">Aligné</td>
+              <td class="px-4 py-3"><button class="text-blue-600 hover:underline">→</button></td>
+            </tr>
+            <tr class="bg-rose-50 hover:bg-rose-100">
+              <td class="px-4 py-3">
+                <div class="flex items-center gap-2">
+                  <span class="h-2 w-2 rounded-full bg-orange-600"></span>
+                  <span class="font-medium">VN — SINOTRUK</span>
+                  <span
+                    class="rounded bg-rose-600 px-1.5 py-0.5 text-[10px] font-bold uppercase text-white"
+                    >Critique</span
+                  >
+                </div>
+              </td>
+              <td class="px-4 py-3 text-right tabular-nums">580 M</td>
+              <td class="px-4 py-3 text-right tabular-nums font-medium">220 M</td>
+              <td class="px-4 py-3 text-right tabular-nums text-rose-700 font-semibold">−360 M</td>
+              <td class="px-4 py-3 text-right tabular-nums font-semibold text-rose-700">−62,1 %</td>
+              <td class="px-4 py-3"><div class="mx-auto h-6 w-16 rounded bg-rose-400"></div></td>
+              <td class="px-4 py-3 text-xs text-amber-700 italic">⚠ À commenter</td>
+              <td class="px-4 py-3"><button class="text-blue-600 hover:underline">→</button></td>
+            </tr>
+            <tr class="hover:bg-slate-50">
+              <td class="px-4 py-3">
+                <div class="flex items-center gap-2">
+                  <span class="h-2 w-2 rounded-full bg-emerald-500"></span>
+                  <span class="font-medium">VN — Lovol & Sealands</span>
+                </div>
+              </td>
+              <td class="px-4 py-3 text-right tabular-nums">240 M</td>
+              <td class="px-4 py-3 text-right tabular-nums font-medium">245 M</td>
+              <td class="px-4 py-3 text-right tabular-nums text-emerald-700">+5 M</td>
+              <td class="px-4 py-3 text-right tabular-nums">+2,1 %</td>
+              <td class="px-4 py-3"><div class="mx-auto h-6 w-16 rounded bg-emerald-100"></div></td>
+              <td class="px-4 py-3 text-xs text-slate-600">Démarrage saison agri</td>
+              <td class="px-4 py-3"><button class="text-blue-600 hover:underline">→</button></td>
+            </tr>
+          </tbody>
+          <tfoot class="bg-slate-50 font-semibold">
+            <tr>
+              <td class="px-4 py-3">TOTAL VN</td>
+              <td class="px-4 py-3 text-right tabular-nums">8 080 M</td>
+              <td class="px-4 py-3 text-right tabular-nums">8 008 M</td>
+              <td class="px-4 py-3 text-right tabular-nums text-rose-700">−72 M</td>
+              <td class="px-4 py-3 text-right tabular-nums">−0,9 %</td>
+              <td class="px-4 py-3"></td>
+              <td class="px-4 py-3"></td>
+              <td class="px-4 py-3"></td>
+            </tr>
+          </tfoot>
+        </table>
+      </section>
+
+      <!-- Drill-down panel preview -->
+      <section class="mt-6 rounded-xl border border-blue-200 bg-blue-50/50 p-5">
+        <div class="flex items-center justify-between">
+          <h2 class="text-base font-semibold text-blue-900">
+            Drill-down — VN Volkswagen · décomposition de l'écart
+          </h2>
+          <button class="text-sm text-blue-700 hover:underline">Fermer</button>
+        </div>
+        <div class="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <div class="rounded-lg bg-white p-3 shadow-sm">
+            <p class="text-xs text-slate-500">Effet volume</p>
+            <p class="text-lg font-bold text-emerald-700">+98 M</p>
+            <p class="text-xs text-slate-400">42 véhicules supp.</p>
+          </div>
+          <div class="rounded-lg bg-white p-3 shadow-sm">
+            <p class="text-xs text-slate-500">Effet prix</p>
+            <p class="text-lg font-bold text-emerald-700">+45 M</p>
+            <p class="text-xs text-slate-400">+1,8 % prix moyen</p>
+          </div>
+          <div class="rounded-lg bg-white p-3 shadow-sm">
+            <p class="text-xs text-slate-500">Effet mix</p>
+            <p class="text-lg font-bold text-emerald-700">+38 M</p>
+            <p class="text-xs text-slate-400">Plus de Tiguan</p>
+          </div>
+          <div class="rounded-lg bg-white p-3 shadow-sm">
+            <p class="text-xs text-slate-500">Effet change</p>
+            <p class="text-lg font-bold text-rose-700">−11 M</p>
+            <p class="text-xs text-slate-400">EUR/XOF stable</p>
+          </div>
+        </div>
+        <div class="mt-4 rounded-lg bg-white p-4">
+          <h3 class="text-sm font-semibold">Comptes contributeurs</h3>
+          <table class="mt-2 w-full text-sm">
+            <tbody class="divide-y divide-slate-100">
+              <tr>
+                <td class="py-1.5 text-slate-600">701110 — Ventes VN Volkswagen</td>
+                <td class="py-1.5 text-right tabular-nums">+143 M</td>
+              </tr>
+              <tr>
+                <td class="py-1.5 text-slate-600">607110 — Achats VN Volkswagen</td>
+                <td class="py-1.5 text-right tabular-nums">+12 M</td>
+              </tr>
+              <tr>
+                <td class="py-1.5 text-slate-600">624000 — Transports sur achats</td>
+                <td class="py-1.5 text-right tabular-nums text-rose-700">+15 M</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

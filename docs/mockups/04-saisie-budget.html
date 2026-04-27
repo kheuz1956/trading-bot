@@ -1,0 +1,526 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Saisie budget · Maquette</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      body {
+        font-family: 'Inter', system-ui, sans-serif;
+      }
+      input[type='text'].cell {
+        @apply w-full bg-transparent text-right tabular-nums focus:bg-blue-50 focus:outline-none focus:ring-2 focus:ring-blue-300;
+      }
+    </style>
+  </head>
+  <body class="bg-slate-50 text-slate-900">
+    <header class="border-b border-slate-200 bg-white">
+      <div class="mx-auto flex max-w-[1400px] items-center justify-between px-6 py-4">
+        <div class="flex items-center gap-3">
+          <a href="index.html" class="text-sm text-slate-500 hover:text-blue-600">← Retour</a>
+          <span class="text-slate-300">|</span>
+          <h1 class="text-lg font-semibold">Saisie budget — VN Volkswagen · FY2026</h1>
+          <span class="rounded-full bg-purple-100 px-2 py-0.5 text-xs font-medium text-purple-700"
+            >Contrôleur</span
+          >
+          <span
+            class="rounded-full bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700 border border-amber-200"
+            >Brouillon</span
+          >
+        </div>
+        <div class="flex items-center gap-2">
+          <span class="text-xs text-slate-500">Sauvegardé il y a 12 sec</span>
+          <button class="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm">
+            Importer Excel
+          </button>
+          <button class="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm">
+            Dupliquer en Optimist
+          </button>
+          <button class="rounded-lg bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white">
+            Soumettre pour validation
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <main class="mx-auto max-w-[1400px] px-6 py-6">
+      <!-- Filtres -->
+      <section class="mb-4 flex flex-wrap items-center gap-3">
+        <select class="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm">
+          <option>Version : Initial 2026 (BASE)</option>
+          <option>Version : Optimiste 2026</option>
+          <option>Version : Pessimiste 2026</option>
+        </select>
+        <select class="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm">
+          <option>Centre de profit : VN Volkswagen</option>
+          <option>VN Haval</option>
+          <option>VN Chery</option>
+        </select>
+        <select class="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm">
+          <option>Devise : XOF</option>
+          <option>EUR</option>
+        </select>
+        <div class="ml-auto flex items-center gap-2 text-xs text-slate-600">
+          <span class="rounded-full bg-blue-100 px-2 py-1 font-medium text-blue-700">12 mois</span>
+          <span class="rounded-full bg-emerald-100 px-2 py-1 font-medium text-emerald-700"
+            >8 lignes</span
+          >
+          <span class="rounded-full bg-slate-100 px-2 py-1 font-medium text-slate-700"
+            >Total : 3 240 M FCFA</span
+          >
+        </div>
+      </section>
+
+      <!-- Tableau de saisie -->
+      <section class="overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
+        <table class="w-full text-sm">
+          <thead class="bg-slate-50 text-xs font-semibold uppercase tracking-wider text-slate-600">
+            <tr>
+              <th class="sticky left-0 z-10 bg-slate-50 px-3 py-2 text-left">Compte</th>
+              <th class="px-3 py-2 text-left">Libellé</th>
+              <th class="px-3 py-2 text-right">Jan</th>
+              <th class="px-3 py-2 text-right">Fév</th>
+              <th class="px-3 py-2 text-right">Mar</th>
+              <th class="px-3 py-2 text-right">Avr</th>
+              <th class="px-3 py-2 text-right">Mai</th>
+              <th class="px-3 py-2 text-right">Juin</th>
+              <th class="px-3 py-2 text-right">Juil</th>
+              <th class="px-3 py-2 text-right">Août</th>
+              <th class="px-3 py-2 text-right">Sep</th>
+              <th class="px-3 py-2 text-right">Oct</th>
+              <th class="px-3 py-2 text-right">Nov</th>
+              <th class="px-3 py-2 text-right">Déc</th>
+              <th class="px-3 py-2 text-right bg-slate-100">Total</th>
+              <th class="px-3 py-2"></th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-100">
+            <tr class="bg-blue-50/40">
+              <td class="sticky left-0 bg-blue-50/40 px-3 py-2 font-mono text-xs">701110</td>
+              <td class="px-3 py-2 font-medium">Ventes VN Volkswagen</td>
+              <td class="px-3 py-1 text-right tabular-nums">
+                <input
+                  value="820"
+                  class="w-full bg-transparent text-right tabular-nums focus:bg-blue-50 focus:outline-none"
+                />
+              </td>
+              <td class="px-3 py-1 text-right tabular-nums">
+                <input
+                  value="850"
+                  class="w-full bg-transparent text-right tabular-nums focus:bg-blue-50 focus:outline-none"
+                />
+              </td>
+              <td class="px-3 py-1 text-right tabular-nums">
+                <input
+                  value="870"
+                  class="w-full bg-transparent text-right tabular-nums focus:bg-blue-50 focus:outline-none"
+                />
+              </td>
+              <td class="px-3 py-1 text-right tabular-nums">
+                <input
+                  value="860"
+                  class="w-full bg-transparent text-right tabular-nums focus:bg-blue-50 focus:outline-none"
+                />
+              </td>
+              <td class="px-3 py-1 text-right tabular-nums">
+                <input
+                  value="870"
+                  class="w-full bg-transparent text-right tabular-nums focus:bg-blue-50 focus:outline-none"
+                />
+              </td>
+              <td class="px-3 py-1 text-right tabular-nums">
+                <input
+                  value="880"
+                  class="w-full bg-transparent text-right tabular-nums focus:bg-blue-50 focus:outline-none"
+                />
+              </td>
+              <td class="px-3 py-1 text-right tabular-nums">
+                <input
+                  value="900"
+                  class="w-full bg-transparent text-right tabular-nums focus:bg-blue-50 focus:outline-none"
+                />
+              </td>
+              <td class="px-3 py-1 text-right tabular-nums">
+                <input
+                  value="880"
+                  class="w-full bg-transparent text-right tabular-nums focus:bg-blue-50 focus:outline-none"
+                />
+              </td>
+              <td class="px-3 py-1 text-right tabular-nums">
+                <input
+                  value="850"
+                  class="w-full bg-transparent text-right tabular-nums focus:bg-blue-50 focus:outline-none"
+                />
+              </td>
+              <td class="px-3 py-1 text-right tabular-nums">
+                <input
+                  value="870"
+                  class="w-full bg-transparent text-right tabular-nums focus:bg-blue-50 focus:outline-none"
+                />
+              </td>
+              <td class="px-3 py-1 text-right tabular-nums">
+                <input
+                  value="890"
+                  class="w-full bg-transparent text-right tabular-nums focus:bg-blue-50 focus:outline-none"
+                />
+              </td>
+              <td class="px-3 py-1 text-right tabular-nums">
+                <input
+                  value="920"
+                  class="w-full bg-transparent text-right tabular-nums focus:bg-blue-50 focus:outline-none"
+                />
+              </td>
+              <td class="px-3 py-2 text-right tabular-nums font-semibold bg-slate-50">10 460</td>
+              <td class="px-3 py-2">
+                <button class="text-blue-600 hover:underline text-xs">💬</button>
+              </td>
+            </tr>
+            <tr>
+              <td class="sticky left-0 bg-white px-3 py-2 font-mono text-xs">607110</td>
+              <td class="px-3 py-2">Achats VN Volkswagen</td>
+              <td class="px-3 py-1 text-right tabular-nums">
+                <input
+                  value="700"
+                  class="w-full bg-transparent text-right tabular-nums focus:bg-blue-50 focus:outline-none"
+                />
+              </td>
+              <td class="px-3 py-1 text-right tabular-nums">
+                <input
+                  value="725"
+                  class="w-full bg-transparent text-right tabular-nums focus:bg-blue-50 focus:outline-none"
+                />
+              </td>
+              <td class="px-3 py-1 text-right tabular-nums">
+                <input
+                  value="740"
+                  class="w-full bg-transparent text-right tabular-nums focus:bg-blue-50 focus:outline-none"
+                />
+              </td>
+              <td class="px-3 py-1 text-right tabular-nums">
+                <input
+                  value="730"
+                  class="w-full bg-transparent text-right tabular-nums focus:bg-blue-50 focus:outline-none"
+                />
+              </td>
+              <td class="px-3 py-1 text-right tabular-nums">
+                <input
+                  value="740"
+                  class="w-full bg-transparent text-right tabular-nums focus:bg-blue-50 focus:outline-none"
+                />
+              </td>
+              <td class="px-3 py-1 text-right tabular-nums">
+                <input
+                  value="750"
+                  class="w-full bg-transparent text-right tabular-nums focus:bg-blue-50 focus:outline-none"
+                />
+              </td>
+              <td class="px-3 py-1 text-right tabular-nums">
+                <input
+                  value="765"
+                  class="w-full bg-transparent text-right tabular-nums focus:bg-blue-50 focus:outline-none"
+                />
+              </td>
+              <td class="px-3 py-1 text-right tabular-nums">
+                <input
+                  value="750"
+                  class="w-full bg-transparent text-right tabular-nums focus:bg-blue-50 focus:outline-none"
+                />
+              </td>
+              <td class="px-3 py-1 text-right tabular-nums">
+                <input
+                  value="725"
+                  class="w-full bg-transparent text-right tabular-nums focus:bg-blue-50 focus:outline-none"
+                />
+              </td>
+              <td class="px-3 py-1 text-right tabular-nums">
+                <input
+                  value="740"
+                  class="w-full bg-transparent text-right tabular-nums focus:bg-blue-50 focus:outline-none"
+                />
+              </td>
+              <td class="px-3 py-1 text-right tabular-nums">
+                <input
+                  value="755"
+                  class="w-full bg-transparent text-right tabular-nums focus:bg-blue-50 focus:outline-none"
+                />
+              </td>
+              <td class="px-3 py-1 text-right tabular-nums">
+                <input
+                  value="780"
+                  class="w-full bg-transparent text-right tabular-nums focus:bg-blue-50 focus:outline-none"
+                />
+              </td>
+              <td class="px-3 py-2 text-right tabular-nums font-semibold bg-slate-50">8 900</td>
+              <td class="px-3 py-2">
+                <button class="text-blue-600 hover:underline text-xs">💬</button>
+              </td>
+            </tr>
+            <tr>
+              <td class="sticky left-0 bg-white px-3 py-2 font-mono text-xs">624000</td>
+              <td class="px-3 py-2">Transports sur achats</td>
+              <td class="px-3 py-1 text-right tabular-nums">
+                <input
+                  value="42"
+                  class="w-full bg-transparent text-right tabular-nums focus:bg-blue-50 focus:outline-none"
+                />
+              </td>
+              <td class="px-3 py-1 text-right tabular-nums">
+                <input
+                  value="44"
+                  class="w-full bg-transparent text-right tabular-nums focus:bg-blue-50 focus:outline-none"
+                />
+              </td>
+              <td class="px-3 py-1 text-right tabular-nums">
+                <input
+                  value="45"
+                  class="w-full bg-transparent text-right tabular-nums focus:bg-blue-50 focus:outline-none"
+                />
+              </td>
+              <td class="px-3 py-1 text-right tabular-nums">
+                <input
+                  value="44"
+                  class="w-full bg-transparent text-right tabular-nums focus:bg-blue-50 focus:outline-none"
+                />
+              </td>
+              <td class="px-3 py-1 text-right tabular-nums">
+                <input
+                  value="45"
+                  class="w-full bg-transparent text-right tabular-nums focus:bg-blue-50 focus:outline-none"
+                />
+              </td>
+              <td class="px-3 py-1 text-right tabular-nums">
+                <input
+                  value="46"
+                  class="w-full bg-transparent text-right tabular-nums focus:bg-blue-50 focus:outline-none"
+                />
+              </td>
+              <td class="px-3 py-1 text-right tabular-nums">
+                <input
+                  value="47"
+                  class="w-full bg-transparent text-right tabular-nums focus:bg-blue-50 focus:outline-none"
+                />
+              </td>
+              <td class="px-3 py-1 text-right tabular-nums">
+                <input
+                  value="46"
+                  class="w-full bg-transparent text-right tabular-nums focus:bg-blue-50 focus:outline-none"
+                />
+              </td>
+              <td class="px-3 py-1 text-right tabular-nums">
+                <input
+                  value="44"
+                  class="w-full bg-transparent text-right tabular-nums focus:bg-blue-50 focus:outline-none"
+                />
+              </td>
+              <td class="px-3 py-1 text-right tabular-nums">
+                <input
+                  value="45"
+                  class="w-full bg-transparent text-right tabular-nums focus:bg-blue-50 focus:outline-none"
+                />
+              </td>
+              <td class="px-3 py-1 text-right tabular-nums">
+                <input
+                  value="46"
+                  class="w-full bg-transparent text-right tabular-nums focus:bg-blue-50 focus:outline-none"
+                />
+              </td>
+              <td class="px-3 py-1 text-right tabular-nums">
+                <input
+                  value="48"
+                  class="w-full bg-transparent text-right tabular-nums focus:bg-blue-50 focus:outline-none"
+                />
+              </td>
+              <td class="px-3 py-2 text-right tabular-nums font-semibold bg-slate-50">542</td>
+              <td class="px-3 py-2">
+                <button class="text-blue-600 hover:underline text-xs">💬</button>
+              </td>
+            </tr>
+            <tr>
+              <td class="sticky left-0 bg-white px-3 py-2 font-mono text-xs">626000</td>
+              <td class="px-3 py-2">Frais postaux & télécom.</td>
+              <td colspan="12" class="px-3 py-2 text-center text-xs text-slate-400 italic">
+                Saisie répartie également : <strong>5,2 M / mois</strong> ·
+                <button class="ml-2 text-blue-600 hover:underline">Modifier détail</button>
+              </td>
+              <td class="px-3 py-2 text-right tabular-nums font-semibold bg-slate-50">62</td>
+              <td class="px-3 py-2">
+                <button class="text-blue-600 hover:underline text-xs">💬</button>
+              </td>
+            </tr>
+            <tr>
+              <td class="sticky left-0 bg-white px-3 py-2 font-mono text-xs">641000</td>
+              <td class="px-3 py-2">Salaires bruts (équipe VW)</td>
+              <td class="px-3 py-1 text-right tabular-nums">
+                <input
+                  value="32"
+                  class="w-full bg-transparent text-right tabular-nums focus:bg-blue-50 focus:outline-none"
+                />
+              </td>
+              <td class="px-3 py-1 text-right tabular-nums">
+                <input
+                  value="32"
+                  class="w-full bg-transparent text-right tabular-nums focus:bg-blue-50 focus:outline-none"
+                />
+              </td>
+              <td class="px-3 py-1 text-right tabular-nums">
+                <input
+                  value="32"
+                  class="w-full bg-transparent text-right tabular-nums focus:bg-blue-50 focus:outline-none"
+                />
+              </td>
+              <td class="px-3 py-1 text-right tabular-nums">
+                <input
+                  value="32"
+                  class="w-full bg-transparent text-right tabular-nums focus:bg-blue-50 focus:outline-none"
+                />
+              </td>
+              <td class="px-3 py-1 text-right tabular-nums">
+                <input
+                  value="32"
+                  class="w-full bg-transparent text-right tabular-nums focus:bg-blue-50 focus:outline-none"
+                />
+              </td>
+              <td class="px-3 py-1 text-right tabular-nums">
+                <input
+                  value="32"
+                  class="w-full bg-transparent text-right tabular-nums focus:bg-blue-50 focus:outline-none"
+                />
+              </td>
+              <td class="px-3 py-1 text-right tabular-nums">
+                <input
+                  value="48"
+                  class="w-full bg-transparent text-right tabular-nums focus:bg-blue-50 focus:outline-none ring-2 ring-amber-400 rounded"
+                />
+              </td>
+              <td class="px-3 py-1 text-right tabular-nums">
+                <input
+                  value="32"
+                  class="w-full bg-transparent text-right tabular-nums focus:bg-blue-50 focus:outline-none"
+                />
+              </td>
+              <td class="px-3 py-1 text-right tabular-nums">
+                <input
+                  value="32"
+                  class="w-full bg-transparent text-right tabular-nums focus:bg-blue-50 focus:outline-none"
+                />
+              </td>
+              <td class="px-3 py-1 text-right tabular-nums">
+                <input
+                  value="32"
+                  class="w-full bg-transparent text-right tabular-nums focus:bg-blue-50 focus:outline-none"
+                />
+              </td>
+              <td class="px-3 py-1 text-right tabular-nums">
+                <input
+                  value="32"
+                  class="w-full bg-transparent text-right tabular-nums focus:bg-blue-50 focus:outline-none"
+                />
+              </td>
+              <td class="px-3 py-1 text-right tabular-nums">
+                <input
+                  value="58"
+                  class="w-full bg-transparent text-right tabular-nums focus:bg-blue-50 focus:outline-none ring-2 ring-amber-400 rounded"
+                />
+              </td>
+              <td class="px-3 py-2 text-right tabular-nums font-semibold bg-slate-50">426</td>
+              <td class="px-3 py-2">
+                <button class="text-blue-600 hover:underline text-xs">💬</button>
+              </td>
+            </tr>
+          </tbody>
+          <tfoot class="bg-slate-100 font-semibold">
+            <tr>
+              <td class="sticky left-0 bg-slate-100 px-3 py-2" colspan="2">TOTAL</td>
+              <td class="px-3 py-2 text-right tabular-nums">1 594</td>
+              <td class="px-3 py-2 text-right tabular-nums">1 651</td>
+              <td class="px-3 py-2 text-right tabular-nums">1 687</td>
+              <td class="px-3 py-2 text-right tabular-nums">1 666</td>
+              <td class="px-3 py-2 text-right tabular-nums">1 687</td>
+              <td class="px-3 py-2 text-right tabular-nums">1 708</td>
+              <td class="px-3 py-2 text-right tabular-nums">1 760</td>
+              <td class="px-3 py-2 text-right tabular-nums">1 708</td>
+              <td class="px-3 py-2 text-right tabular-nums">1 651</td>
+              <td class="px-3 py-2 text-right tabular-nums">1 687</td>
+              <td class="px-3 py-2 text-right tabular-nums">1 723</td>
+              <td class="px-3 py-2 text-right tabular-nums">1 806</td>
+              <td class="px-3 py-2 text-right tabular-nums bg-slate-200">20 390</td>
+              <td></td>
+            </tr>
+          </tfoot>
+        </table>
+      </section>
+
+      <!-- Cellule active : commentaire panel -->
+      <section class="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-3">
+        <div class="rounded-xl border border-amber-200 bg-amber-50 p-5 lg:col-span-2">
+          <div class="flex items-center gap-2 text-sm font-medium text-amber-900">
+            <span>💬</span>
+            <span>Commentaire pour 641000 / Juillet 2026</span>
+          </div>
+          <textarea
+            class="mt-3 w-full rounded-lg border border-amber-300 bg-white p-3 text-sm focus:outline-none focus:ring-2 focus:ring-amber-300"
+            rows="3"
+            placeholder="Hypothèse, source, formule…"
+          >
+Recrutement chef de vente Tiguan en juillet (+1 ETP × 16 M FCFA charge ann.). Idem en décembre : prime de fin d'année (toute l'équipe).</textarea
+          >
+          <div class="mt-2 flex items-center gap-2">
+            <button class="rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-medium text-white">
+              Enregistrer
+            </button>
+            <button class="rounded-lg border border-amber-300 bg-white px-3 py-1.5 text-xs">
+              Annuler
+            </button>
+          </div>
+        </div>
+
+        <div class="rounded-xl border border-slate-200 bg-white p-5">
+          <h3 class="text-sm font-semibold text-slate-700">Comparaison scénarios</h3>
+          <div class="mt-3 space-y-2 text-sm">
+            <div class="flex items-center justify-between">
+              <span class="text-slate-500">Pessimiste</span>
+              <span class="tabular-nums font-medium">19,2 Md</span>
+            </div>
+            <div class="flex items-center justify-between rounded bg-blue-50 p-2">
+              <span class="font-medium">Réaliste (en cours)</span>
+              <span class="tabular-nums font-bold">20,4 Md</span>
+            </div>
+            <div class="flex items-center justify-between">
+              <span class="text-slate-500">Optimiste</span>
+              <span class="tabular-nums font-medium">22,5 Md</span>
+            </div>
+          </div>
+          <button
+            class="mt-4 w-full rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs hover:bg-slate-50"
+          >
+            Comparer les 3 côte à côte
+          </button>
+        </div>
+      </section>
+
+      <!-- Action bar bottom -->
+      <section
+        class="mt-6 flex items-center justify-between rounded-xl border border-slate-200 bg-white p-4"
+      >
+        <div class="text-sm text-slate-600">
+          <span>Dernière modif : Cheikh Dieng · 28/04/2026 16:42</span>
+          <span class="mx-2 text-slate-300">|</span>
+          <span>Créé : 15/01/2026</span>
+        </div>
+        <div class="flex items-center gap-2">
+          <button class="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm">
+            + Ajouter une ligne (compte)
+          </button>
+          <button class="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm">
+            Historique des versions
+          </button>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

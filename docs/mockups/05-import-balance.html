@@ -1,0 +1,397 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Import balance comptable · Maquette</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      body {
+        font-family: 'Inter', system-ui, sans-serif;
+      }
+    </style>
+  </head>
+  <body class="bg-slate-50 text-slate-900">
+    <header class="border-b border-slate-200 bg-white">
+      <div class="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
+        <div class="flex items-center gap-3">
+          <a href="index.html" class="text-sm text-slate-500 hover:text-blue-600">← Retour</a>
+          <span class="text-slate-300">|</span>
+          <h1 class="text-lg font-semibold">Import balance comptable</h1>
+          <span class="rounded-full bg-rose-100 px-2 py-0.5 text-xs font-medium text-rose-700"
+            >Comptable</span
+          >
+        </div>
+        <a href="#" class="text-sm text-blue-600 hover:underline">Voir l'historique des imports</a>
+      </div>
+    </header>
+
+    <main class="mx-auto max-w-6xl px-6 py-6">
+      <!-- Stepper -->
+      <ol class="mb-6 flex items-center gap-2 text-sm">
+        <li class="flex items-center gap-2">
+          <span
+            class="flex h-7 w-7 items-center justify-center rounded-full bg-emerald-600 text-xs font-bold text-white"
+            >✓</span
+          >
+          <span class="font-medium text-emerald-700">1. Upload</span>
+        </li>
+        <span class="text-slate-300">→</span>
+        <li class="flex items-center gap-2">
+          <span
+            class="flex h-7 w-7 items-center justify-center rounded-full bg-blue-600 text-xs font-bold text-white"
+            >2</span
+          >
+          <span class="font-medium text-blue-700">Aperçu & validation</span>
+        </li>
+        <span class="text-slate-300">→</span>
+        <li class="flex items-center gap-2">
+          <span
+            class="flex h-7 w-7 items-center justify-center rounded-full bg-slate-200 text-xs font-bold text-slate-500"
+            >3</span
+          >
+          <span class="text-slate-500">Mapping comptes inconnus</span>
+        </li>
+        <span class="text-slate-300">→</span>
+        <li class="flex items-center gap-2">
+          <span
+            class="flex h-7 w-7 items-center justify-center rounded-full bg-slate-200 text-xs font-bold text-slate-500"
+            >4</span
+          >
+          <span class="text-slate-500">Confirmation</span>
+        </li>
+      </ol>
+
+      <!-- File info -->
+      <section class="mb-6 rounded-xl border border-slate-200 bg-white p-5">
+        <div class="flex items-start gap-4">
+          <div
+            class="flex h-12 w-12 items-center justify-center rounded-lg bg-blue-100 text-blue-700"
+          >
+            <span class="text-xl">📄</span>
+          </div>
+          <div class="flex-1">
+            <p class="font-semibold">balance_avril_2026.csv</p>
+            <p class="text-sm text-slate-500">
+              412 KB · 3 246 lignes · Source : <span class="font-medium">Sage 100</span> · Période :
+              Avril 2026
+            </p>
+            <p class="mt-1 text-xs text-slate-400">
+              SHA-256 : <span class="font-mono">8f4a...e21c</span>
+            </p>
+          </div>
+          <button class="text-sm text-rose-600 hover:underline">Annuler & remplacer</button>
+        </div>
+      </section>
+
+      <!-- Validation cards -->
+      <section class="mb-6 grid grid-cols-2 gap-4 sm:grid-cols-4">
+        <div class="rounded-xl border border-emerald-200 bg-emerald-50 p-4">
+          <div class="flex items-center gap-2">
+            <span class="text-emerald-600">✓</span>
+            <p class="text-xs font-medium uppercase tracking-wide text-emerald-700">
+              Équilibre comptable
+            </p>
+          </div>
+          <p class="mt-2 text-2xl font-bold text-emerald-900">OK</p>
+          <p class="text-xs text-emerald-700">Σ débits = Σ crédits</p>
+        </div>
+        <div class="rounded-xl border border-emerald-200 bg-emerald-50 p-4">
+          <div class="flex items-center gap-2">
+            <span class="text-emerald-600">✓</span>
+            <p class="text-xs font-medium uppercase tracking-wide text-emerald-700">
+              Doublon détecté ?
+            </p>
+          </div>
+          <p class="mt-2 text-2xl font-bold text-emerald-900">Non</p>
+          <p class="text-xs text-emerald-700">Hash inconnu</p>
+        </div>
+        <div class="rounded-xl border border-amber-200 bg-amber-50 p-4">
+          <div class="flex items-center gap-2">
+            <span class="text-amber-600">⚠</span>
+            <p class="text-xs font-medium uppercase tracking-wide text-amber-700">
+              Comptes inconnus
+            </p>
+          </div>
+          <p class="mt-2 text-2xl font-bold text-amber-900">7</p>
+          <p class="text-xs text-amber-700">Mapping requis</p>
+        </div>
+        <div class="rounded-xl border border-blue-200 bg-blue-50 p-4">
+          <div class="flex items-center gap-2">
+            <span class="text-blue-600">🛈</span>
+            <p class="text-xs font-medium uppercase tracking-wide text-blue-700">
+              Période ouverte ?
+            </p>
+          </div>
+          <p class="mt-2 text-2xl font-bold text-blue-900">Oui</p>
+          <p class="text-xs text-blue-700">Avr 2026 — modifiable</p>
+        </div>
+      </section>
+
+      <!-- Totals breakdown -->
+      <section class="mb-6 rounded-xl border border-slate-200 bg-white p-5">
+        <h2 class="text-base font-semibold">Totaux de l'import</h2>
+        <div class="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-3">
+          <div class="rounded-lg bg-slate-50 p-4">
+            <p class="text-xs text-slate-500">Total débits</p>
+            <p class="text-xl font-bold tabular-nums">2 145 832 410 FCFA</p>
+            <p class="text-xs text-slate-400">3 246 lignes</p>
+          </div>
+          <div class="rounded-lg bg-slate-50 p-4">
+            <p class="text-xs text-slate-500">Total crédits</p>
+            <p class="text-xl font-bold tabular-nums">2 145 832 410 FCFA</p>
+            <p class="text-xs text-slate-400">3 246 lignes</p>
+          </div>
+          <div class="rounded-lg bg-emerald-50 p-4">
+            <p class="text-xs text-emerald-700">Différence</p>
+            <p class="text-xl font-bold tabular-nums text-emerald-900">0 FCFA</p>
+            <p class="text-xs text-emerald-700">Équilibre parfait ✓</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- Comptes inconnus -->
+      <section class="mb-6 rounded-xl border border-amber-200 bg-amber-50/40 p-5">
+        <div class="flex items-center justify-between">
+          <h2 class="text-base font-semibold text-amber-900">7 comptes inconnus à mapper</h2>
+          <button class="text-sm text-amber-700 hover:underline">
+            Mapper automatiquement (best-effort)
+          </button>
+        </div>
+        <p class="mt-1 text-xs text-amber-700">
+          Ces codes n'existent pas dans le plan SYSCOHADA actuel. Ils seront créés ou redirigés
+          selon ton choix.
+        </p>
+
+        <div class="mt-4 overflow-x-auto rounded-lg border border-amber-200 bg-white">
+          <table class="w-full text-sm">
+            <thead
+              class="bg-amber-100/50 text-xs font-semibold uppercase tracking-wide text-amber-900"
+            >
+              <tr>
+                <th class="px-3 py-2 text-left">Code source</th>
+                <th class="px-3 py-2 text-left">Libellé source</th>
+                <th class="px-3 py-2 text-right">Lignes</th>
+                <th class="px-3 py-2 text-right">Montant total</th>
+                <th class="px-3 py-2 text-left">Action</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-amber-100">
+              <tr class="hover:bg-amber-50">
+                <td class="px-3 py-2 font-mono">607115</td>
+                <td class="px-3 py-2">Achats VW pickup Amarok</td>
+                <td class="px-3 py-2 text-right tabular-nums">42</td>
+                <td class="px-3 py-2 text-right tabular-nums">324 580 200</td>
+                <td class="px-3 py-2">
+                  <select class="rounded border border-amber-300 px-2 py-1 text-xs">
+                    <option>→ 607110 — Achats VN VW</option>
+                    <option>Créer nouveau compte</option>
+                    <option>Ignorer</option>
+                  </select>
+                </td>
+              </tr>
+              <tr class="hover:bg-amber-50">
+                <td class="px-3 py-2 font-mono">701118</td>
+                <td class="px-3 py-2">Ventes VW Tiguan ICE</td>
+                <td class="px-3 py-2 text-right tabular-nums">28</td>
+                <td class="px-3 py-2 text-right tabular-nums">216 730 000</td>
+                <td class="px-3 py-2">
+                  <select class="rounded border border-amber-300 px-2 py-1 text-xs">
+                    <option>→ 701110 — Ventes VN VW</option>
+                    <option>Créer nouveau compte</option>
+                    <option>Ignorer</option>
+                  </select>
+                </td>
+              </tr>
+              <tr class="hover:bg-amber-50">
+                <td class="px-3 py-2 font-mono">624005</td>
+                <td class="px-3 py-2">Fret maritime CN→DKR conteneur</td>
+                <td class="px-3 py-2 text-right tabular-nums">12</td>
+                <td class="px-3 py-2 text-right tabular-nums">87 442 100</td>
+                <td class="px-3 py-2">
+                  <select class="rounded border border-amber-300 px-2 py-1 text-xs">
+                    <option>→ 624000 — Transports sur achats</option>
+                    <option>Créer nouveau compte</option>
+                    <option>Ignorer</option>
+                  </select>
+                </td>
+              </tr>
+              <tr class="hover:bg-amber-50">
+                <td class="px-3 py-2 font-mono">622900</td>
+                <td class="px-3 py-2">Frais auxiliaires de transport</td>
+                <td class="px-3 py-2 text-right tabular-nums">8</td>
+                <td class="px-3 py-2 text-right tabular-nums">12 308 750</td>
+                <td class="px-3 py-2">
+                  <select class="rounded border border-amber-300 px-2 py-1 text-xs">
+                    <option>↻ Détecter automatiquement</option>
+                    <option>→ 624000 — Transports sur achats</option>
+                    <option>Créer nouveau compte</option>
+                  </select>
+                </td>
+              </tr>
+              <tr class="hover:bg-amber-50">
+                <td class="px-3 py-2 font-mono">412005</td>
+                <td class="px-3 py-2">Clients — Effets non échus VW</td>
+                <td class="px-3 py-2 text-right tabular-nums">15</td>
+                <td class="px-3 py-2 text-right tabular-nums">204 750 000</td>
+                <td class="px-3 py-2">
+                  <select class="rounded border border-amber-300 px-2 py-1 text-xs">
+                    <option>→ 412000 — Clients effets à recevoir</option>
+                    <option>Créer nouveau compte</option>
+                  </select>
+                </td>
+              </tr>
+              <tr class="hover:bg-amber-50">
+                <td class="px-3 py-2 font-mono">444500</td>
+                <td class="px-3 py-2">État — TVA spéciale véhicule</td>
+                <td class="px-3 py-2 text-right tabular-nums">35</td>
+                <td class="px-3 py-2 text-right tabular-nums">152 184 320</td>
+                <td class="px-3 py-2">
+                  <select class="rounded border border-amber-300 px-2 py-1 text-xs">
+                    <option>Créer nouveau compte (recommandé)</option>
+                    <option>→ 444000 — État TVA</option>
+                    <option>Ignorer</option>
+                  </select>
+                </td>
+              </tr>
+              <tr class="hover:bg-amber-50">
+                <td class="px-3 py-2 font-mono">658800</td>
+                <td class="px-3 py-2">Pénalités douanières</td>
+                <td class="px-3 py-2 text-right tabular-nums">3</td>
+                <td class="px-3 py-2 text-right tabular-nums">4 250 000</td>
+                <td class="px-3 py-2">
+                  <select class="rounded border border-amber-300 px-2 py-1 text-xs">
+                    <option>→ 658000 — Charges diverses gestion</option>
+                    <option>Créer nouveau compte</option>
+                  </select>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Aperçu lignes -->
+      <section class="mb-6 rounded-xl border border-slate-200 bg-white">
+        <div class="flex items-center justify-between border-b border-slate-200 px-5 py-3">
+          <h2 class="text-base font-semibold">Aperçu des 10 premières lignes</h2>
+          <input
+            type="search"
+            placeholder="Rechercher un compte ou libellé…"
+            class="rounded-lg border border-slate-300 px-3 py-1 text-sm"
+          />
+        </div>
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead class="bg-slate-50 text-xs font-semibold uppercase tracking-wide text-slate-600">
+              <tr>
+                <th class="px-3 py-2 text-left">Date</th>
+                <th class="px-3 py-2 text-left">Journal</th>
+                <th class="px-3 py-2 text-left">Pièce</th>
+                <th class="px-3 py-2 text-left">Compte</th>
+                <th class="px-3 py-2 text-left">Libellé</th>
+                <th class="px-3 py-2 text-right">Débit</th>
+                <th class="px-3 py-2 text-right">Crédit</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-100">
+              <tr>
+                <td class="px-3 py-1.5">02/04</td>
+                <td class="px-3 py-1.5">VTE</td>
+                <td class="px-3 py-1.5 font-mono">F-2026-0412</td>
+                <td class="px-3 py-1.5 font-mono">411000</td>
+                <td class="px-3 py-1.5">SOPABEN — VW Tiguan VIN ...4582</td>
+                <td class="px-3 py-1.5 text-right tabular-nums">28 750 000</td>
+                <td class="px-3 py-1.5 text-right tabular-nums">—</td>
+              </tr>
+              <tr>
+                <td class="px-3 py-1.5">02/04</td>
+                <td class="px-3 py-1.5">VTE</td>
+                <td class="px-3 py-1.5 font-mono">F-2026-0412</td>
+                <td class="px-3 py-1.5 font-mono">701110</td>
+                <td class="px-3 py-1.5">Ventes VN Volkswagen</td>
+                <td class="px-3 py-1.5 text-right tabular-nums">—</td>
+                <td class="px-3 py-1.5 text-right tabular-nums">24 364 407</td>
+              </tr>
+              <tr>
+                <td class="px-3 py-1.5">02/04</td>
+                <td class="px-3 py-1.5">VTE</td>
+                <td class="px-3 py-1.5 font-mono">F-2026-0412</td>
+                <td class="px-3 py-1.5 font-mono">443000</td>
+                <td class="px-3 py-1.5">État — TVA collectée 18 %</td>
+                <td class="px-3 py-1.5 text-right tabular-nums">—</td>
+                <td class="px-3 py-1.5 text-right tabular-nums">4 385 593</td>
+              </tr>
+              <tr class="bg-amber-50/50">
+                <td class="px-3 py-1.5">03/04</td>
+                <td class="px-3 py-1.5">ACH</td>
+                <td class="px-3 py-1.5 font-mono">FA-VW-018</td>
+                <td class="px-3 py-1.5 font-mono text-amber-700">607115 ⚠</td>
+                <td class="px-3 py-1.5">Achats VW pickup Amarok lot 4</td>
+                <td class="px-3 py-1.5 text-right tabular-nums">8 720 000</td>
+                <td class="px-3 py-1.5 text-right tabular-nums">—</td>
+              </tr>
+              <tr>
+                <td class="px-3 py-1.5">03/04</td>
+                <td class="px-3 py-1.5">ACH</td>
+                <td class="px-3 py-1.5 font-mono">FA-VW-018</td>
+                <td class="px-3 py-1.5 font-mono">401000</td>
+                <td class="px-3 py-1.5">VW Group import</td>
+                <td class="px-3 py-1.5 text-right tabular-nums">—</td>
+                <td class="px-3 py-1.5 text-right tabular-nums">8 720 000</td>
+              </tr>
+              <tr>
+                <td class="px-3 py-1.5">04/04</td>
+                <td class="px-3 py-1.5">BNQ</td>
+                <td class="px-3 py-1.5 font-mono">VIR-1842</td>
+                <td class="px-3 py-1.5 font-mono">521100</td>
+                <td class="px-3 py-1.5">Banque Atlantique — virement client SOPABEN</td>
+                <td class="px-3 py-1.5 text-right tabular-nums">28 750 000</td>
+                <td class="px-3 py-1.5 text-right tabular-nums">—</td>
+              </tr>
+              <tr>
+                <td class="px-3 py-1.5">04/04</td>
+                <td class="px-3 py-1.5">BNQ</td>
+                <td class="px-3 py-1.5 font-mono">VIR-1842</td>
+                <td class="px-3 py-1.5 font-mono">411000</td>
+                <td class="px-3 py-1.5">Encaissement client SOPABEN</td>
+                <td class="px-3 py-1.5 text-right tabular-nums">—</td>
+                <td class="px-3 py-1.5 text-right tabular-nums">28 750 000</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="border-t border-slate-200 px-5 py-3 text-xs text-slate-500">
+          ... 3 239 lignes supplémentaires
+        </div>
+      </section>
+
+      <!-- Action bar -->
+      <section
+        class="sticky bottom-0 -mx-6 flex items-center justify-between border-t border-slate-200 bg-white px-6 py-4 shadow-lg"
+      >
+        <p class="text-sm text-slate-600">
+          Une fois validé, l'import est <strong>définitif</strong>. Un rollback nécessite des droits
+          DAF.
+        </p>
+        <div class="flex items-center gap-2">
+          <button class="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm">
+            Annuler
+          </button>
+          <button class="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm">
+            Sauvegarder en brouillon
+          </button>
+          <button
+            class="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700"
+          >
+            Valider l'import (3 246 lignes)
+          </button>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

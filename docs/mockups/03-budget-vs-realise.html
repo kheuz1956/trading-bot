@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Budget vs Réalisé vs Forecast · Maquette</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      body {
+        font-family: 'Inter', system-ui, sans-serif;
+      }
+    </style>
+  </head>
+  <body class="bg-slate-50 text-slate-900">
+    <header class="border-b border-slate-200 bg-white">
+      <div class="mx-auto flex max-w-7xl items-center justify-between px-6 py-4">
+        <div class="flex items-center gap-3">
+          <a href="index.html" class="text-sm text-slate-500 hover:text-blue-600">← Retour</a>
+          <span class="text-slate-300">|</span>
+          <h1 class="text-lg font-semibold">Budget vs Réalisé vs Forecast</h1>
+          <span class="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700"
+            >Contrôleur</span
+          >
+        </div>
+        <div class="flex items-center gap-2">
+          <button class="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm">
+            Imprimer
+          </button>
+          <button class="rounded-lg bg-blue-600 px-3 py-1.5 text-sm font-medium text-white">
+            Mettre à jour le forecast
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <main class="mx-auto max-w-7xl px-6 py-6">
+      <!-- Filtres -->
+      <section
+        class="mb-5 flex flex-wrap items-center gap-3 rounded-xl border border-slate-200 bg-white p-4"
+      >
+        <div>
+          <label class="block text-xs font-medium text-slate-500">Exercice</label>
+          <select class="mt-1 rounded-lg border border-slate-300 px-3 py-1.5 text-sm">
+            <option>FY2026</option>
+            <option>FY2025</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-slate-500">Indicateur</label>
+          <select class="mt-1 rounded-lg border border-slate-300 px-3 py-1.5 text-sm">
+            <option>Chiffre d'affaires</option>
+            <option>Marge brute</option>
+            <option>Volume véhicules</option>
+            <option>Coût d'achat</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-slate-500">Centre de profit</label>
+          <select class="mt-1 rounded-lg border border-slate-300 px-3 py-1.5 text-sm">
+            <option>Toutes activités VN</option>
+            <option>VN — Volkswagen</option>
+            <option>VN — Haval</option>
+            <option>VN — Chery</option>
+            <option>VN — Great Wall</option>
+            <option>VN — SINOTRUK</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-slate-500">Mode forecast</label>
+          <select class="mt-1 rounded-lg border border-slate-300 px-3 py-1.5 text-sm">
+            <option>Linéaire (mois restants = budget)</option>
+            <option>Tendance (extrapolation)</option>
+            <option>Saisonnalité</option>
+          </select>
+        </div>
+        <div class="ml-auto text-xs text-slate-500">
+          Dernière maj forecast : <span class="font-medium text-slate-700">28/04/2026 14:32</span>
+        </div>
+      </section>
+
+      <!-- Courbe principale -->
+      <section class="rounded-xl border border-slate-200 bg-white p-5">
+        <div class="flex items-center justify-between">
+          <div>
+            <h2 class="text-base font-semibold">CA mensuel — FY2026 (en M FCFA)</h2>
+            <p class="text-xs text-slate-500">
+              Réalisé jan-avr · Forecast mai-déc · Atterrissage estimé : 25,8 Md FCFA
+            </p>
+          </div>
+          <div class="flex items-center gap-4 text-xs">
+            <span class="flex items-center gap-1.5">
+              <span class="h-0.5 w-4 bg-slate-300"></span><span>Budget initial</span>
+            </span>
+            <span class="flex items-center gap-1.5">
+              <span class="h-0.5 w-4 bg-blue-600"></span><span>Réalisé</span>
+            </span>
+            <span class="flex items-center gap-1.5">
+              <span class="h-0.5 w-4 border-t-2 border-dashed border-amber-500"></span
+              ><span>Forecast</span>
+            </span>
+          </div>
+        </div>
+        <div class="mt-4 h-72">
+          <canvas id="curveChart"></canvas>
+        </div>
+      </section>
+
+      <!-- Écart cumulé bar chart -->
+      <section class="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-3">
+        <div class="rounded-xl border border-slate-200 bg-white p-5 lg:col-span-2">
+          <h2 class="text-base font-semibold">Écart cumulé Réalisé vs Budget</h2>
+          <p class="text-xs text-slate-500">
+            Mois par mois — vert = favorable, rouge = défavorable
+          </p>
+          <div class="mt-4 h-56">
+            <canvas id="varianceChart"></canvas>
+          </div>
+        </div>
+
+        <div class="rounded-xl border border-slate-200 bg-white p-5">
+          <h2 class="text-base font-semibold">Atterrissage prévisionnel</h2>
+          <p class="text-xs text-slate-500">FY2026 — total annuel</p>
+
+          <div class="mt-5 space-y-4">
+            <div>
+              <p class="text-xs uppercase tracking-wide text-slate-500">Budget initial</p>
+              <p class="text-2xl font-bold">24,87 Md</p>
+            </div>
+            <div>
+              <p class="text-xs uppercase tracking-wide text-slate-500">Réalisé YTD (4 mois)</p>
+              <p class="text-2xl font-bold">8,42 Md</p>
+              <p class="text-xs text-slate-500">soit 33,9 % du budget annuel</p>
+            </div>
+            <div class="rounded-lg bg-amber-50 p-3">
+              <p class="text-xs uppercase tracking-wide text-amber-800">Forecast atterrissage</p>
+              <p class="text-2xl font-bold text-amber-900">25,80 Md</p>
+              <p class="text-xs text-amber-800">+930 M FCFA vs budget · +3,7 %</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Décomposition par marque -->
+      <section class="mt-6 rounded-xl border border-slate-200 bg-white p-5">
+        <h2 class="text-base font-semibold">Décomposition forecast par marque</h2>
+        <p class="text-xs text-slate-500">
+          Atterrissage prévisionnel FY2026 — par centre de profit
+        </p>
+        <div class="mt-4 h-64">
+          <canvas id="brandStackChart"></canvas>
+        </div>
+      </section>
+    </main>
+
+    <script>
+      const months = [
+        'Jan',
+        'Fév',
+        'Mar',
+        'Avr',
+        'Mai',
+        'Juin',
+        'Juil',
+        'Août',
+        'Sep',
+        'Oct',
+        'Nov',
+        'Déc',
+      ];
+
+      // Courbe principale
+      new Chart(document.getElementById('curveChart'), {
+        type: 'line',
+        data: {
+          labels: months,
+          datasets: [
+            {
+              label: 'Budget',
+              data: [2000, 2020, 2050, 2010, 2080, 2100, 2150, 2120, 2080, 2110, 2140, 2200],
+              borderColor: '#cbd5e1',
+              backgroundColor: 'rgba(203, 213, 225, 0.1)',
+              tension: 0.3,
+              borderWidth: 2,
+            },
+            {
+              label: 'Réalisé',
+              data: [2050, 2110, 2140, 2120, null, null, null, null, null, null, null, null],
+              borderColor: '#2563eb',
+              backgroundColor: 'rgba(37, 99, 235, 0.1)',
+              tension: 0.3,
+              borderWidth: 3,
+              pointBackgroundColor: '#2563eb',
+              pointRadius: 4,
+            },
+            {
+              label: 'Forecast',
+              data: [null, null, null, 2120, 2150, 2180, 2230, 2200, 2150, 2180, 2200, 2280],
+              borderColor: '#f59e0b',
+              backgroundColor: 'rgba(245, 158, 11, 0.05)',
+              tension: 0.3,
+              borderWidth: 2,
+              borderDash: [6, 4],
+              pointRadius: 3,
+            },
+          ],
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: { legend: { display: false } },
+          scales: {
+            y: {
+              beginAtZero: false,
+              ticks: { callback: (v) => v + ' M', color: '#64748b' },
+              grid: { color: '#f1f5f9' },
+            },
+            x: { ticks: { color: '#64748b' }, grid: { display: false } },
+          },
+        },
+      });
+
+      // Écart cumulé
+      const variances = [50, 90, 90, 110, null, null, null, null, null, null, null, null];
+      new Chart(document.getElementById('varianceChart'), {
+        type: 'bar',
+        data: {
+          labels: months,
+          datasets: [
+            {
+              data: variances,
+              backgroundColor: variances.map((v) =>
+                v === null ? '#e2e8f0' : v >= 0 ? '#10b981' : '#ef4444',
+              ),
+              borderRadius: 4,
+            },
+          ],
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: { legend: { display: false } },
+          scales: {
+            y: {
+              ticks: { callback: (v) => (v >= 0 ? '+' : '') + v + ' M', color: '#64748b' },
+              grid: { color: '#f1f5f9' },
+            },
+            x: { ticks: { color: '#64748b' }, grid: { display: false } },
+          },
+        },
+      });
+
+      // Décomposition par marque (stacked)
+      new Chart(document.getElementById('brandStackChart'), {
+        type: 'bar',
+        data: {
+          labels: months,
+          datasets: [
+            {
+              label: 'Volkswagen',
+              data: [820, 850, 870, 860, 870, 880, 900, 880, 850, 870, 890, 920],
+              backgroundColor: '#3b82f6',
+            },
+            {
+              label: 'Haval',
+              data: [490, 520, 530, 510, 520, 530, 540, 530, 510, 520, 530, 550],
+              backgroundColor: '#ef4444',
+            },
+            {
+              label: 'Chery',
+              data: [320, 310, 305, 295, 310, 320, 330, 325, 320, 320, 330, 340],
+              backgroundColor: '#f59e0b',
+            },
+            {
+              label: 'Great Wall',
+              data: [225, 230, 230, 235, 240, 245, 250, 248, 240, 245, 250, 260],
+              backgroundColor: '#94a3b8',
+            },
+            {
+              label: 'SINOTRUK',
+              data: [115, 125, 135, 130, 140, 145, 150, 145, 140, 145, 150, 160],
+              backgroundColor: '#ea580c',
+            },
+            {
+              label: 'Lovol & Sealands',
+              data: [80, 85, 90, 90, 95, 100, 105, 100, 90, 95, 100, 110],
+              backgroundColor: '#10b981',
+            },
+          ],
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: { legend: { position: 'bottom', labels: { boxWidth: 10, font: { size: 11 } } } },
+          scales: {
+            x: { stacked: true, ticks: { color: '#64748b' }, grid: { display: false } },
+            y: {
+              stacked: true,
+              ticks: { callback: (v) => v + ' M', color: '#64748b' },
+              grid: { color: '#f1f5f9' },
+            },
+          },
+        },
+      });
+    </script>
+  </body>
+</html>

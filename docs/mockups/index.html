@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Maquettes — App suivi budgétaire dealership</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      body {
+        font-family: 'Inter', system-ui, sans-serif;
+      }
+    </style>
+  </head>
+  <body class="bg-slate-50 text-slate-900">
+    <header class="bg-slate-900 text-white">
+      <div class="mx-auto max-w-6xl px-6 py-12">
+        <p class="text-sm font-medium uppercase tracking-wider text-slate-400">
+          Cadrage v0.1 — Maquettes UX/UI
+        </p>
+        <h1 class="mt-2 text-4xl font-bold">App de suivi budgétaire</h1>
+        <p class="mt-2 text-lg text-slate-300">
+          Concessionnaire multi-marques · Volkswagen, Haval, Great Wall, Chery, SINOTRUK, Lovol,
+          Sealands
+        </p>
+        <div class="mt-6 flex flex-wrap gap-2 text-xs">
+          <span class="rounded-full bg-amber-500/20 px-3 py-1 font-medium text-amber-300"
+            >Mockups statiques — données fictives</span
+          >
+          <span class="rounded-full bg-slate-700 px-3 py-1 font-medium text-slate-300"
+            >MVP · Phase 1 — Vente VN</span
+          >
+          <span class="rounded-full bg-slate-700 px-3 py-1 font-medium text-slate-300"
+            >Stack cible : React + Tailwind + Recharts</span
+          >
+        </div>
+      </div>
+    </header>
+
+    <main class="mx-auto max-w-6xl px-6 py-10">
+      <section class="mb-10">
+        <h2 class="mb-4 text-2xl font-semibold">5 écrans clés du MVP</h2>
+        <p class="text-slate-600">
+          Ces maquettes illustrent les flux principaux décrits dans
+          <a class="text-blue-600 underline" href="../03-roadmap-mvp.md">03-roadmap-mvp.md</a>.
+          Elles sont volontairement simplifiées pour validation visuelle avant le développement.
+        </p>
+      </section>
+
+      <div class="grid gap-6 sm:grid-cols-2">
+        <a
+          href="01-dg-dashboard.html"
+          class="group rounded-xl border border-slate-200 bg-white p-6 shadow-sm transition hover:-translate-y-0.5 hover:border-blue-400 hover:shadow-md"
+        >
+          <div
+            class="mb-3 inline-flex h-10 w-10 items-center justify-center rounded-lg bg-blue-100 text-blue-700"
+          >
+            <span class="text-lg font-bold">1</span>
+          </div>
+          <h3 class="text-lg font-semibold group-hover:text-blue-700">DG — Vue 1 minute</h3>
+          <p class="mt-1 text-sm text-slate-600">
+            Tableau de bord exécutif : CA, marge, écart, alertes critiques. Optimisé mobile.
+          </p>
+          <p class="mt-3 text-xs text-slate-500">User stories · US-040, US-044</p>
+        </a>
+
+        <a
+          href="02-daf-ecarts.html"
+          class="group rounded-xl border border-slate-200 bg-white p-6 shadow-sm transition hover:-translate-y-0.5 hover:border-blue-400 hover:shadow-md"
+        >
+          <div
+            class="mb-3 inline-flex h-10 w-10 items-center justify-center rounded-lg bg-emerald-100 text-emerald-700"
+          >
+            <span class="text-lg font-bold">2</span>
+          </div>
+          <h3 class="text-lg font-semibold group-hover:text-blue-700">DAF — Tableau d'écarts</h3>
+          <p class="mt-1 text-sm text-slate-600">
+            Vue analytique par centre de profit avec heatmap, commentaires, drill-down compte.
+          </p>
+          <p class="mt-3 text-xs text-slate-500">User stories · US-041, US-045</p>
+        </a>
+
+        <a
+          href="03-budget-vs-realise.html"
+          class="group rounded-xl border border-slate-200 bg-white p-6 shadow-sm transition hover:-translate-y-0.5 hover:border-blue-400 hover:shadow-md"
+        >
+          <div
+            class="mb-3 inline-flex h-10 w-10 items-center justify-center rounded-lg bg-amber-100 text-amber-700"
+          >
+            <span class="text-lg font-bold">3</span>
+          </div>
+          <h3 class="text-lg font-semibold group-hover:text-blue-700">
+            Courbe Budget vs Réalisé vs Forecast
+          </h3>
+          <p class="mt-1 text-sm text-slate-600">
+            Visualisation 12 mois avec 3 séries comparées et écart cumulé.
+          </p>
+          <p class="mt-3 text-xs text-slate-500">User story · US-042</p>
+        </a>
+
+        <a
+          href="04-saisie-budget.html"
+          class="group rounded-xl border border-slate-200 bg-white p-6 shadow-sm transition hover:-translate-y-0.5 hover:border-blue-400 hover:shadow-md"
+        >
+          <div
+            class="mb-3 inline-flex h-10 w-10 items-center justify-center rounded-lg bg-purple-100 text-purple-700"
+          >
+            <span class="text-lg font-bold">4</span>
+          </div>
+          <h3 class="text-lg font-semibold group-hover:text-blue-700">
+            Contrôleur — Saisie budget
+          </h3>
+          <p class="mt-1 text-sm text-slate-600">
+            Tableau éditable 12 mois × N comptes, totaux automatiques, scénarios.
+          </p>
+          <p class="mt-3 text-xs text-slate-500">User stories · US-021, US-023, US-025</p>
+        </a>
+
+        <a
+          href="05-import-balance.html"
+          class="group rounded-xl border border-slate-200 bg-white p-6 shadow-sm transition hover:-translate-y-0.5 hover:border-blue-400 hover:shadow-md sm:col-span-2"
+        >
+          <div
+            class="mb-3 inline-flex h-10 w-10 items-center justify-center rounded-lg bg-rose-100 text-rose-700"
+          >
+            <span class="text-lg font-bold">5</span>
+          </div>
+          <h3 class="text-lg font-semibold group-hover:text-blue-700">
+            Comptable — Import balance + preview
+          </h3>
+          <p class="mt-1 text-sm text-slate-600">
+            Upload, validation d'équilibre comptable, mapping comptes inconnus, rejet/import.
+          </p>
+          <p class="mt-3 text-xs text-slate-500">User stories · US-030 → US-034</p>
+        </a>
+      </div>
+
+      <section class="mt-12 rounded-xl border border-amber-200 bg-amber-50 p-6">
+        <h3 class="text-lg font-semibold text-amber-900">Notes de lecture</h3>
+        <ul class="mt-3 space-y-2 text-sm text-amber-900">
+          <li>
+            • Les chiffres affichés sont <strong>fictifs et illustratifs</strong>, basés sur les
+            ordres de grandeur du cadrage (volumes H12-H14).
+          </li>
+          <li>
+            • Les couleurs marques (VW bleu, Haval rouge, etc.) sont
+            <strong>arbitraires</strong> — à confirmer avec la charte graphique cible.
+          </li>
+          <li>
+            • Le mode mobile est testable en réduisant la fenêtre du navigateur (responsive design
+            Tailwind).
+          </li>
+          <li>
+            • Aucune logique fonctionnelle : ce sont des
+            <strong>maquettes statiques</strong> pour validation visuelle uniquement.
+          </li>
+        </ul>
+      </section>
+    </main>
+
+    <footer class="border-t border-slate-200 bg-white">
+      <div class="mx-auto max-w-6xl px-6 py-8 text-center text-sm text-slate-500">
+        Cadrage projet — généré avec Claude Code · v0.1
+      </div>
+    </footer>
+  </body>
+</html>

@@ -63,20 +63,22 @@ INDICATOR_ALIASES = {
     "MARGES": {"MARGES", "MARGE"},
 }
 
-# Months we expect in headers (lowercase, accent-stripped)
+# Months we expect in headers (lowercase, accent-stripped). Patterns must
+# use word boundaries — naive substrings like "mar" would match "marque",
+# "marge", "marketing", etc. and assign random columns to March.
 MONTH_PATTERNS = [
-    (r"jan", 1),
-    (r"f[eé]v", 2),
-    (r"mar", 3),
-    (r"avr", 4),
-    (r"mai", 5),
-    (r"juin", 6),
-    (r"juil", 7),
-    (r"ao[uû]", 8),
-    (r"sept", 9),
-    (r"oct", 10),
-    (r"nov", 11),
-    (r"d[eé]c", 12),
+    (r"\bjanvier\b|\bjanv?\b", 1),
+    (r"\bf[eé]vrier\b|\bf[eé]v\b", 2),
+    (r"\bmars\b", 3),
+    (r"\bavril\b|\bavr\b", 4),
+    (r"\bmai\b", 5),
+    (r"\bjuin\b", 6),
+    (r"\bjuillet\b|\bjuil\b", 7),
+    (r"\bao[uû]t\b", 8),
+    (r"\bseptembre\b|\bsept\b", 9),
+    (r"\boctobre\b|\boct\b", 10),
+    (r"\bnovembre\b|\bnov\b", 11),
+    (r"\bd[eé]cembre\b|\bd[eé]c\b", 12),
 ]
 
 
@@ -94,8 +96,14 @@ def detect_period_for_column(
 ) -> str | None:
     """Try to figure out what period a column represents based on its header.
 
+    Order of checks matters: most specific first to avoid greedy substring
+    matches (e.g., "BUDGET 2026 (Budget S1+S2)" must NOT match the S1-budget
+    rule).
+
     Returns:
-        period_code like "2026-01", "2026-S1", "2026-S2", "2026", or None
+        period_code: "2026-01" .. "2026-12", "2026-S1-budget",
+        "2026-S1-actual", "2026-S2-budget", "2026-S2-actual",
+        "2026-total", "2026-adjusted", or None.
     """
     texts: list[str] = []
     for r in header_rows:
@@ -110,20 +118,40 @@ def detect_period_for_column(
 
     full_text = " ".join(texts)
     norm = normalize(full_text)
+    if not norm:
+        return None
 
-    # Semester totals
-    if "budget 1" in norm or "budget s1" in norm or "1ere semestre" in norm:
-        return "2026-S1-budget"
-    if "real" in norm and ("1ere semestre" in norm or "s1" in norm):
-        return "2026-S1-actual"
-    if "budget 2" in norm or "budget s2" in norm or "2eme semestre" in norm or "2ème semestre" in norm:
-        return "2026-S2-budget"
-    if "budget 2026" in norm:
+    # ---- Most specific first ----
+
+    # Annual total — must come before S2 / S1 budget checks because the
+    # text "BUDGET 2026 (Budget S1+S2)" contains the substrings "budget s1",
+    # "budget s2" and "budget 2".
+    if re.search(r"\bbudget\s*2026\b", norm) or "s1+s2" in norm:
         return "2026-total"
-    if "ajuste" in norm or "ajusté" in norm:
+
+    # Adjusted/forecast (Budget 2025 ajusté aux réalisations)
+    if "ajuste" in norm:
         return "2026-adjusted"
 
-    # Match a single month from text
+    # Semester real/actual — keyword "real" present
+    if re.search(r"\breal", norm):
+        if "s1" in norm or "1ere semestre" in norm or "1er semestre" in norm:
+            return "2026-S1-actual"
+        if "s2" in norm or "2eme semestre" in norm or "2nd semestre" in norm:
+            return "2026-S2-actual"
+
+    # Semester budget — must use word boundaries to avoid matching inside
+    # "Budget 2026" (already handled above) and "S1+S2" (already handled).
+    if re.search(r"\bbudget\s*1(?:e|ere?)?\s*semestre\b", norm) or re.search(
+        r"\bbudget\s*s1\b", norm
+    ):
+        return "2026-S1-budget"
+    if re.search(r"\bbudget\s*2(?:e|eme|nd)?\s*semestre\b", norm) or re.search(
+        r"\bbudget\s*s2\b", norm
+    ):
+        return "2026-S2-budget"
+
+    # Match a single month from text (last resort)
     for pattern, month in MONTH_PATTERNS:
         if re.search(pattern, norm):
             return f"2026-{month:02d}"
@@ -188,14 +216,44 @@ def parse_brand_sheet(
     # Cap columns to scan (some sheets have 16k cols due to formatting)
     max_col = min(ws.max_column, 30)
 
-    # Identify period for each data column (D..end)
+    # Identify period for each data column. Skip columns to the LEFT of the
+    # indicator (those are model-name / category columns, never periods),
+    # and if two columns still map to the same period, keep only the
+    # LEFT-MOST one — extra columns to the right are typically user-added
+    # derived columns (margin %, growth rate) whose date header collides
+    # with a real month.
     period_by_col: dict[int, str | None] = {}
+    seen_periods: dict[str, int] = {}  # period -> first column that claimed it
     header_rows = range(1, 5)
-    for c in range(1, max_col + 1):
+    for c in range(indicator_col + 1, max_col + 1):
         period = detect_period_for_column(ws, c, header_rows)
-        period_by_col[c] = period
+        if period is None:
+            period_by_col[c] = None
+            continue
+        if period in seen_periods:
+            meta["anomalies"].append(
+                f"Column {get_column_letter(c)} also claims period {period} "
+                f"(already taken by {get_column_letter(seen_periods[period])}) — ignored"
+            )
+            period_by_col[c] = None
+        else:
+            period_by_col[c] = period
+            seen_periods[period] = c
 
     meta["period_columns"] = {get_column_letter(c): p for c, p in period_by_col.items() if p}
+
+    # Track model names we've already seen to handle real Excel duplicates
+    # (e.g. GW sheet has 'H6 TOP' on rows 15 AND 35) — disambiguate with suffix
+    # so the (brand, model) key remains unique downstream.
+    model_seen: dict[str, int] = {}
+
+    # Patterns that indicate the row is a SUMMARY / TOTAL line, not a real model.
+    # These rows appear in some sheets (e.g. GW row 76 = "TOTAL PREVISION") and
+    # would inflate aggregations if kept.
+    SUMMARY_RE = re.compile(
+        r"\b(total|somme|recap|recapitulatif|general|grand[\s_-]?total|sous[\s_-]?total)\b",
+        re.IGNORECASE,
+    )
 
     # Walk rows looking for "block of 4 rows" pattern
     r = 3  # start after header rows
@@ -229,6 +287,25 @@ def parse_brand_sheet(
             meta["anomalies"].append(f"UNITES at row {r} without model name")
             r += 4
             continue
+
+        # Skip summary / total rows that are not real vehicle models
+        if SUMMARY_RE.search(model_name):
+            meta["anomalies"].append(
+                f"Skipped summary row at {r}: {model_name!r} (matched TOTAL/SOMME/RECAP)"
+            )
+            r += 4
+            continue
+
+        # Disambiguate real duplicates: H6 TOP appearing twice → 'H6 TOP', 'H6 TOP (#2)', ...
+        if model_name in model_seen:
+            model_seen[model_name] += 1
+            disambiguated = f"{model_name} (#{model_seen[model_name]})"
+            meta["anomalies"].append(
+                f"Duplicate model {model_name!r} at row {r} → renamed {disambiguated!r}"
+            )
+            model_name = disambiguated
+        else:
+            model_seen[model_name] = 1
 
         meta["models_found"] += 1
 
@@ -325,6 +402,29 @@ def main() -> int:
             f"  {code:<12s}  models={meta['models_found']:<3d}"
             f"  cells={meta['cells_extracted']:<5d}"
             f"  anomalies={len(meta['anomalies'])}"
+        )
+
+    # ---- Duplicate detection ----
+    key_count: dict[tuple[str, str, str, str], int] = {}
+    for rec in all_records:
+        key = (rec["brand"], rec["model"], rec["period_code"], rec["indicator"])
+        key_count[key] = key_count.get(key, 0) + 1
+    dups = {k: c for k, c in key_count.items() if c > 1}
+    if dups:
+        print(
+            f"\n⚠️  WARNING: {len(dups)} duplicate keys found "
+            f"(same brand/model/period/indicator extracted from multiple cells).",
+            file=sys.stderr,
+        )
+        # Show top 5
+        for k, c in list(dups.items())[:5]:
+            print(f"     {k} ×{c}", file=sys.stderr)
+        if len(dups) > 5:
+            print(f"     ... +{len(dups) - 5} more", file=sys.stderr)
+        print(
+            "     This usually means the period detection misclassified a column; "
+            "check the period_columns metadata.",
+            file=sys.stderr,
         )
 
     # Always emit metadata (safe — no values)

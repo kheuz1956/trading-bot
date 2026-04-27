@@ -34,12 +34,14 @@ TEMPLATE = REPO_ROOT / "dashboard" / "index.html"
 DEFAULT_OUTPUT = REPO_ROOT / "scripts" / ".local" / "dashboard.html"
 PARSER_OUTPUT = REPO_ROOT / "scripts" / ".local" / "parsed-budget.json"
 META_OUTPUT = REPO_ROOT / "scripts" / ".local" / "parsed-budget.meta.json"
+SAV_OUTPUT = REPO_ROOT / "scripts" / ".local" / "parsed-sav.json"
+SAV_META_OUTPUT = REPO_ROOT / "scripts" / ".local" / "parsed-sav.meta.json"
 
 
 def run_parser(src: Path) -> tuple[list[dict], list[dict]]:
-    """Run the parser script, return (records, brand_meta)."""
+    """Run the VN parser script, return (records, brand_meta)."""
     parser_script = REPO_ROOT / "scripts" / "parse-budget-vn.py"
-    print(f"Running parser on {src.name}...")
+    print(f"Running VN parser on {src.name}...")
 
     PARSER_OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     result = subprocess.run(
@@ -56,7 +58,7 @@ def run_parser(src: Path) -> tuple[list[dict], list[dict]]:
         encoding="utf-8",
     )
     if result.returncode != 0:
-        print(f"Parser failed:\n{result.stderr}", file=sys.stderr)
+        print(f"VN parser failed:\n{result.stderr}", file=sys.stderr)
         sys.exit(1)
     print(result.stdout)
 
@@ -65,7 +67,48 @@ def run_parser(src: Path) -> tuple[list[dict], list[dict]]:
     return records, brand_meta
 
 
-def build_dashboard(records: list[dict], brand_meta: list[dict], src: Path, out: Path) -> None:
+def run_sav_parser(src: Path) -> tuple[list[dict], list[dict]]:
+    """Run the SAV parser script, return (records, sav_meta). Soft-fails."""
+    parser_script = REPO_ROOT / "scripts" / "parse-sav.py"
+    if not parser_script.exists():
+        print("SAV parser script not found — skipping SAV section.")
+        return [], []
+    print(f"Running SAV parser on {src.name}...")
+
+    SAV_OUTPUT.parent.mkdir(parents=True, exist_ok=True)
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(parser_script),
+            "--input",
+            str(src),
+            "--output",
+            str(SAV_OUTPUT),
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    if result.returncode != 0:
+        print(f"SAV parser failed (non-fatal):\n{result.stderr}", file=sys.stderr)
+        return [], []
+    print(result.stdout)
+
+    records = json.loads(SAV_OUTPUT.read_text(encoding="utf-8")) if SAV_OUTPUT.exists() else []
+    sav_meta = (
+        json.loads(SAV_META_OUTPUT.read_text(encoding="utf-8")) if SAV_META_OUTPUT.exists() else []
+    )
+    return records, sav_meta
+
+
+def build_dashboard(
+    records: list[dict],
+    brand_meta: list[dict],
+    sav_records: list[dict],
+    sav_meta: list[dict],
+    src: Path,
+    out: Path,
+) -> None:
     if not TEMPLATE.exists():
         print(f"Template not found: {TEMPLATE}", file=sys.stderr)
         sys.exit(1)
@@ -76,16 +119,22 @@ def build_dashboard(records: list[dict], brand_meta: list[dict], src: Path, out:
         "source_file": src.name,
         "build_date": dt.datetime.now().strftime("%Y-%m-%d %H:%M"),
         "record_count": len(records),
+        "sav_record_count": len(sav_records),
         "brand_meta": brand_meta,
+        "sav_meta": sav_meta,
     }
 
     # Use compact JSON to keep file size reasonable
     data_json = json.dumps(records, separators=(",", ":"), ensure_ascii=False)
+    sav_json = json.dumps(sav_records, separators=(",", ":"), ensure_ascii=False)
     meta_json = json.dumps(meta, separators=(",", ":"), ensure_ascii=False, default=str)
 
-    # Replace placeholders. Use simple string replace — the template has these
-    # exact tokens nowhere else (verified manually in dashboard/index.html).
-    populated = template_html.replace("__DATA__", data_json).replace("__META__", meta_json)
+    # Replace placeholders.
+    populated = (
+        template_html.replace("__DATA__", data_json)
+        .replace("__SAV_DATA__", sav_json)
+        .replace("__META__", meta_json)
+    )
 
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(populated, encoding="utf-8")
@@ -93,7 +142,8 @@ def build_dashboard(records: list[dict], brand_meta: list[dict], src: Path, out:
     size_kb = out.stat().st_size / 1024
     print(f"\nDashboard written: {out}")
     print(f"  Size: {size_kb:,.1f} KB")
-    print(f"  Records embedded: {len(records):,}")
+    print(f"  VN records embedded:  {len(records):,}")
+    print(f"  SAV records embedded: {len(sav_records):,}")
     print(f"  Open in browser: file:///{out.as_posix()}")
 
 
@@ -109,7 +159,8 @@ def main() -> int:
         return 1
 
     records, brand_meta = run_parser(src)
-    build_dashboard(records, brand_meta, src, Path(args.output))
+    sav_records, sav_meta = run_sav_parser(src)
+    build_dashboard(records, brand_meta, sav_records, sav_meta, src, Path(args.output))
     return 0
 
 

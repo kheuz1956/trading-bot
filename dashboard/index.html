@@ -32,6 +32,9 @@
     <script id="budget-data" type="application/json">
       __DATA__
     </script>
+    <script id="sav-data" type="application/json">
+      __SAV_DATA__
+    </script>
     <script id="build-meta" type="application/json">
       __META__
     </script>
@@ -261,6 +264,89 @@
           >
             Suiv. →
           </button>
+        </div>
+      </section>
+
+      <!-- ============================================================ -->
+      <!-- Section SAV — Atelier & magasin                              -->
+      <!-- ============================================================ -->
+      <section
+        class="mt-10 mb-5 rounded-xl border-2 border-emerald-200 bg-emerald-50/40 p-5"
+        id="sav-section"
+      >
+        <div class="mb-4 flex items-center justify-between">
+          <div>
+            <h2 class="text-xl font-bold text-emerald-900">SAV — Atelier & service après-vente</h2>
+            <p class="text-xs text-emerald-700">
+              Source : feuilles SAV VP + SAV VL — <span id="sav-record-count">—</span> records
+            </p>
+          </div>
+          <div class="flex gap-2">
+            <button
+              id="sav-tab-vp"
+              class="rounded-lg bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white"
+            >
+              SAV VP
+            </button>
+            <button
+              id="sav-tab-vl"
+              class="rounded-lg border border-emerald-300 bg-white px-3 py-1.5 text-sm"
+            >
+              SAV VL
+            </button>
+          </div>
+        </div>
+
+        <!-- KPI cards SAV -->
+        <div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
+          <div class="rounded-lg border border-emerald-200 bg-white p-4">
+            <p class="text-xs font-medium text-slate-500">CA Budget 2026 (revenue)</p>
+            <p class="mt-2 text-2xl font-bold num" id="sav-kpi-ca">—</p>
+            <p class="mt-1 text-xs text-slate-500">
+              SUBTOTAL_REVENUE · <span id="sav-kpi-ca-period">—</span>
+            </p>
+          </div>
+          <div class="rounded-lg border border-emerald-200 bg-white p-4">
+            <p class="text-xs font-medium text-slate-500">Coûts directs Budget 2026</p>
+            <p class="mt-2 text-2xl font-bold num text-rose-700" id="sav-kpi-cost">—</p>
+            <p class="mt-1 text-xs text-slate-500">section COST</p>
+          </div>
+          <div class="rounded-lg border border-emerald-200 bg-white p-4">
+            <p class="text-xs font-medium text-slate-500">Marge brute estimée</p>
+            <p class="mt-2 text-2xl font-bold num text-emerald-700" id="sav-kpi-marge">—</p>
+            <p class="mt-1 text-xs text-slate-500">CA − Coûts (calculé)</p>
+          </div>
+        </div>
+
+        <!-- Monthly chart -->
+        <div class="mt-4 rounded-lg border border-emerald-200 bg-white p-4">
+          <h3 class="text-sm font-semibold">Évolution mensuelle 2026 — CA vs Coûts</h3>
+          <div class="mt-2 h-64">
+            <canvas id="chart-sav-monthly"></canvas>
+          </div>
+        </div>
+
+        <!-- Postes table -->
+        <div class="mt-4 rounded-lg border border-emerald-200 bg-white">
+          <div class="border-b border-emerald-200 px-4 py-2 text-sm font-semibold">
+            Top postes par CA Budget 2026
+          </div>
+          <div class="overflow-x-auto scrollbar-thin">
+            <table class="w-full text-sm">
+              <thead
+                class="bg-slate-50 text-xs font-semibold uppercase tracking-wide text-slate-600"
+              >
+                <tr>
+                  <th class="px-4 py-2 text-left">Poste budgétaire</th>
+                  <th class="px-4 py-2 text-left">Section</th>
+                  <th class="px-4 py-2 text-right">Janv-Juin (S1)</th>
+                  <th class="px-4 py-2 text-right">Juil-Déc (S2)</th>
+                  <th class="px-4 py-2 text-right">Total 2026</th>
+                </tr>
+              </thead>
+              <tbody id="sav-table-body" class="divide-y divide-slate-100"></tbody>
+            </table>
+          </div>
         </div>
       </section>
 
@@ -789,6 +875,202 @@
 
       // Initial render
       renderAll();
+
+      // ===================================================================
+      // SAV section — Atelier & service après-vente
+      // ===================================================================
+      let savRecords = [];
+      try {
+        const savText = document.getElementById('sav-data')?.textContent?.trim() ?? '';
+        if (savText && savText !== '__SAV_DATA__') {
+          savRecords = JSON.parse(savText);
+        }
+      } catch (e) {
+        console.warn('SAV data not available:', e);
+      }
+      document.getElementById('sav-record-count').textContent =
+        savRecords.length.toLocaleString('fr-FR');
+
+      const savState = { activity: 'SAV-VP' };
+      const SAV_MONTHS_FR = MONTHS_FR;
+      let chartSavMonthly;
+
+      function savFiltered(activity) {
+        return savRecords.filter((r) => r.activity === activity);
+      }
+
+      function savSumWhere(rs, predicate) {
+        let s = 0;
+        for (const r of rs) {
+          if (typeof r.value !== 'number') continue;
+          if (predicate(r)) s += r.value;
+        }
+        return s;
+      }
+
+      function renderSAV() {
+        const rs = savFiltered(savState.activity);
+
+        // CA Budget = SUBTOTAL_REVENUE rows on monthly periods (avoids double-counting raw lines)
+        const isMonthly = (r) => /^2026-\d{2}$/.test(r.period_code);
+        const caMonthly = savSumWhere(rs, (r) => r.section === 'SUBTOTAL_REVENUE' && isMonthly(r));
+        // If no SUBTOTAL_REVENUE for monthly, fall back to summing REVENUE rows
+        const caFallback = savSumWhere(rs, (r) => r.section === 'REVENUE' && isMonthly(r));
+        const ca = caMonthly > 0 ? caMonthly : caFallback;
+
+        const cost = savSumWhere(rs, (r) => r.section === 'COST' && isMonthly(r));
+        const marge = ca - cost;
+
+        document.getElementById('sav-kpi-ca').textContent = fmtCurrency(ca);
+        document.getElementById('sav-kpi-cost').textContent = fmtCurrency(cost);
+        document.getElementById('sav-kpi-marge').textContent = fmtCurrency(marge);
+        document.getElementById('sav-kpi-ca-period').textContent = 'Cumul 12 mois 2026';
+
+        // Monthly chart: revenue (SUBTOTAL_REVENUE preferred) vs cost
+        const revByMonth = new Array(12).fill(0);
+        const costByMonth = new Array(12).fill(0);
+        for (const r of rs) {
+          if (typeof r.value !== 'number') continue;
+          const m = monthOf(r.period_code);
+          if (m === null) continue;
+          if (r.section === 'SUBTOTAL_REVENUE') revByMonth[m - 1] += r.value;
+          else if (r.section === 'COST') costByMonth[m - 1] += r.value;
+        }
+        // Fall back to REVENUE if no SUBTOTAL data
+        const hasSubtotal = revByMonth.some((v) => v > 0);
+        if (!hasSubtotal) {
+          for (const r of rs) {
+            if (typeof r.value !== 'number') continue;
+            const m = monthOf(r.period_code);
+            if (m === null) continue;
+            if (r.section === 'REVENUE') revByMonth[m - 1] += r.value;
+          }
+        }
+
+        if (chartSavMonthly) chartSavMonthly.destroy();
+        chartSavMonthly = new Chart(document.getElementById('chart-sav-monthly'), {
+          type: 'bar',
+          data: {
+            labels: SAV_MONTHS_FR,
+            datasets: [
+              { label: 'CA', data: revByMonth, backgroundColor: '#10b981', borderRadius: 4 },
+              {
+                label: 'Coûts',
+                data: costByMonth,
+                backgroundColor: '#ef4444',
+                borderRadius: 4,
+              },
+            ],
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+              legend: { position: 'bottom', labels: { boxWidth: 10, font: { size: 11 } } },
+              tooltip: {
+                callbacks: { label: (ctx) => `${ctx.dataset.label}: ${fmtCurrency(ctx.parsed.y)}` },
+              },
+            },
+            scales: {
+              x: { ticks: { color: '#64748b' }, grid: { display: false } },
+              y: {
+                ticks: {
+                  callback: (v) =>
+                    fmtNum(
+                      v,
+                      state.view === 'MILLION' ? 1_000_000 : state.view === 'THOUSAND' ? 1_000 : 1,
+                    ),
+                  color: '#64748b',
+                },
+                grid: { color: '#f1f5f9' },
+              },
+            },
+          },
+        });
+
+        // Top postes table — aggregate by poste with S1, S2, total columns
+        const aggByPoste = new Map();
+        for (const r of rs) {
+          if (typeof r.value !== 'number') continue;
+          if (r.section === 'SECTION_REVENUE_HEADER') continue; // skip pure headers
+          if (r.section === 'SECTION_COST_HEADER') continue;
+          if (r.section === 'SECTION_MARGIN_HEADER') continue;
+          const k = r.poste;
+          if (!aggByPoste.has(k)) {
+            aggByPoste.set(k, {
+              poste: r.poste,
+              section: r.section,
+              s1: 0,
+              s2: 0,
+              total: 0,
+              monthly: 0,
+            });
+          }
+          const a = aggByPoste.get(k);
+          if (r.period_code === '2026-S1-budget') a.s1 = r.value;
+          else if (r.period_code === '2026-S2-budget') a.s2 = r.value;
+          else if (r.period_code === '2026-total') a.total = r.value;
+          else if (isMonthly(r)) a.monthly += r.value;
+        }
+        // Compute total fallback if not present
+        for (const a of aggByPoste.values()) {
+          if (a.total === 0 && (a.s1 > 0 || a.s2 > 0 || a.monthly > 0)) {
+            a.total = a.s1 + a.s2 || a.monthly;
+          }
+          if (a.s1 === 0 && a.monthly > 0) a.s1 = a.monthly / 2; // rough split
+        }
+
+        const sorted = [...aggByPoste.values()]
+          .filter((a) => a.total !== 0)
+          .sort((a, b) => Math.abs(b.total) - Math.abs(a.total))
+          .slice(0, 20);
+
+        const sectionColor = {
+          REVENUE: 'bg-emerald-100 text-emerald-700',
+          COST: 'bg-rose-100 text-rose-700',
+          MARGIN: 'bg-blue-100 text-blue-700',
+          SUBTOTAL: 'bg-slate-200 text-slate-800',
+          SUBTOTAL_REVENUE: 'bg-emerald-200 text-emerald-900',
+          OTHER: 'bg-slate-100 text-slate-600',
+        };
+
+        const tbody = document.getElementById('sav-table-body');
+        tbody.innerHTML = '';
+        for (const a of sorted) {
+          const tr = document.createElement('tr');
+          tr.className = 'hover:bg-slate-50';
+          const cls = sectionColor[a.section] || 'bg-slate-100 text-slate-600';
+          tr.innerHTML = `
+            <td class="px-4 py-1.5 text-xs">${a.poste.length > 65 ? a.poste.slice(0, 65) + '…' : a.poste}</td>
+            <td class="px-4 py-1.5"><span class="rounded ${cls} px-2 py-0.5 text-[10px] font-semibold uppercase">${a.section}</span></td>
+            <td class="px-4 py-1.5 text-right num text-xs">${fmtCurrency(a.s1)}</td>
+            <td class="px-4 py-1.5 text-right num text-xs">${fmtCurrency(a.s2)}</td>
+            <td class="px-4 py-1.5 text-right num font-medium text-xs">${fmtCurrency(a.total)}</td>
+          `;
+          tbody.appendChild(tr);
+        }
+      }
+
+      // Wire SAV tabs
+      document.getElementById('sav-tab-vp').addEventListener('click', () => {
+        savState.activity = 'SAV-VP';
+        document.getElementById('sav-tab-vp').className =
+          'rounded-lg bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white';
+        document.getElementById('sav-tab-vl').className =
+          'rounded-lg border border-emerald-300 bg-white px-3 py-1.5 text-sm';
+        renderSAV();
+      });
+      document.getElementById('sav-tab-vl').addEventListener('click', () => {
+        savState.activity = 'SAV-VL';
+        document.getElementById('sav-tab-vl').className =
+          'rounded-lg bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white';
+        document.getElementById('sav-tab-vp').className =
+          'rounded-lg border border-emerald-300 bg-white px-3 py-1.5 text-sm';
+        renderSAV();
+      });
+
+      // Initial SAV render
+      renderSAV();
     </script>
   </body>
 </html>

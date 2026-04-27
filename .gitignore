@@ -46,3 +46,9 @@ desktop.ini
 # Claude Code (per-user state)
 .claude/settings.local.json
 .claude/local/
+
+# Local parser outputs (contain real budget values — NEVER commit)
+scripts/.local/
+
+# Scratch text reports from budget exploration
+scripts/budget-*.txt

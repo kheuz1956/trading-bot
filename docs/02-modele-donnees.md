@@ -1,6 +1,7 @@
 # 02 — Modèle de données
 
-> **Statut** : v0.1 — schéma ER initial pour MVP (Vente VN). Extensions Phases 2-5 indiquées en commentaires.
+> **Statut** : v0.1 — **À RÉVISER en v0.2** suite à l'analyse du budget Excel réel.
+> **Voir [04-budget-existant-decouvertes.md](04-budget-existant-decouvertes.md)** pour le pivot architectural validé : le modèle doit être centré sur **Brand × VehicleModel × Period × Indicator** (couche commerciale = source de vérité), avec le plan SYSCOHADA en couche secondaire dérivée.
 > **Choix techniques** : PostgreSQL 16 + Prisma ORM. Toutes les tables en `snake_case`. Identifiants UUID v7 (triables temporellement, évite collisions multi-instances).
 
 ---

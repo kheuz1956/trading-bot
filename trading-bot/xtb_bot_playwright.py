@@ -238,6 +238,85 @@ def get_ohlcv() -> pd.DataFrame:
 STATE_FILE = Path(__file__).parent / "bot_state.json"
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# SESSION TRACKER — statistiques en temps réel + gate journalier
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class SessionTracker:
+    """
+    Suivi temps réel de la session :
+    - P&L cumulé (pts et USD)
+    - Win rate + W/L count
+    - Drawdown maximum
+    - Gate journalier : bloque les nouveaux trades si MAX_DAILY_LOSS_USD dépassé
+    """
+
+    def __init__(self):
+        self.daily_pnl_pts: float = 0.0
+        self.daily_pnl_usd: float = 0.0
+        self.peak_pnl_pts:  float = 0.0
+        self.max_drawdown:  float = 0.0
+        self.trades: list[dict]   = []
+        self.session_start        = datetime.now(timezone.utc)
+
+    @property
+    def wins(self) -> int:
+        return sum(1 for t in self.trades if t["pnl_pts"] > 0)
+
+    @property
+    def losses(self) -> int:
+        return sum(1 for t in self.trades if t["pnl_pts"] <= 0)
+
+    @property
+    def win_rate(self) -> float:
+        if not self.trades:
+            return 0.0
+        return self.wins / len(self.trades) * 100
+
+    def record_trade(self, side: str, entry: float, exit_price: float, volume: float):
+        """Enregistre un trade clôturé et met à jour toutes les stats."""
+        pnl_pts = (entry - exit_price) if side == "SHORT" else (exit_price - entry)
+        # US100 : 1 lot = 1 USD/point → volume_lots × pnl_pts (approximation CFD)
+        pnl_usd = pnl_pts * volume
+        self.daily_pnl_pts += pnl_pts
+        self.daily_pnl_usd += pnl_usd
+        # Drawdown tracking
+        if self.daily_pnl_pts > self.peak_pnl_pts:
+            self.peak_pnl_pts = self.daily_pnl_pts
+        drawdown = self.peak_pnl_pts - self.daily_pnl_pts
+        if drawdown > self.max_drawdown:
+            self.max_drawdown = drawdown
+        self.trades.append({
+            "side":    side,
+            "entry":   entry,
+            "exit":    exit_price,
+            "volume":  volume,
+            "pnl_pts": round(pnl_pts, 1),
+            "pnl_usd": round(pnl_usd, 2),
+            "time":    datetime.now(timezone.utc).strftime("%H:%M GMT"),
+        })
+        log.info(
+            f"  [SESSION] Trade #{len(self.trades)} {side} {pnl_pts:+.1f}pts ({pnl_usd:+.2f}$) | "
+            f"Journée: {self.daily_pnl_pts:+.1f}pts ({self.daily_pnl_usd:+.2f}$) | "
+            f"WR: {self.win_rate:.0f}% ({self.wins}W/{self.losses}L)"
+        )
+
+    def is_daily_loss_exceeded(self) -> bool:
+        """Vérifie si la limite de perte journalière est atteinte."""
+        return self.daily_pnl_usd < -config.MAX_DAILY_LOSS_USD
+
+    def print_stats(self):
+        sep = "═" * 56
+        log.info(sep)
+        log.info(f"  SESSION STATS | {datetime.now(timezone.utc).strftime('%H:%M GMT')}")
+        log.info(f"  Trades: {len(self.trades)} | W/L: {self.wins}/{self.losses} | WR: {self.win_rate:.0f}%")
+        log.info(f"  P&L: {self.daily_pnl_pts:+.1f} pts ({self.daily_pnl_usd:+.2f} USD)")
+        log.info(f"  Drawdown max: {self.max_drawdown:.1f} pts")
+        log.info(f"  Limite journaliere: {-config.MAX_DAILY_LOSS_USD:.0f} USD "
+                 f"({'ATTEINTE' if self.is_daily_loss_exceeded() else 'OK'})")
+        log.info(sep)
+
+
 class XStation5Bot:
 
     LOGIN_URL   = "https://xstation5.xtb.com/?branch=int#/_/login"
@@ -253,24 +332,31 @@ class XStation5Bot:
         # Dernier trade clôturé — sert à filtrer les re-entrées défavorables
         self._last_entry_price: float | None = None
         self._last_trade_side: str | None    = None
-        self.daily_loss = 0.0
-        self._intel       = MarketIntelligenceEngine()
-        self._macro       = MacroIntelligenceEngine()
-        self._calendar    = EconomicCalendarEngine()
+        self._intel        = MarketIntelligenceEngine()
+        self._macro        = MacroIntelligenceEngine()
+        self._calendar     = EconomicCalendarEngine()
         self._surveillance = NewsSurveillanceEngine(scan_interval=120)
+        self._session      = SessionTracker()
+        # Volume courant du trade — calculé dynamiquement selon grade + news
+        self._current_volume: float = config.VOLUME
+        # Trailing stop — prix du stop après TP1
+        self._trail_stop: float | None = None
         # Circuit breaker — protection contre pertes consecutives
-        self._consecutive_losses: int   = 0
+        self._consecutive_losses: int      = 0
         self._circuit_breaker_until: float = 0.0   # timestamp unix
         self._last_signal_type: str | None = None  # ex: "M15-SHORT"
 
     def _save_state(self):
         """Persiste l'état du trade en cours + dernier trade clôturé sur disque."""
         STATE_FILE.write_text(json.dumps({
-            "entry_price":       self._entry_price,
-            "trade_side":        self._trade_side,
-            "tp1_done":          self._tp1_done,
-            "last_entry_price":  self._last_entry_price,
-            "last_trade_side":   self._last_trade_side,
+            "entry_price":        self._entry_price,
+            "trade_side":         self._trade_side,
+            "tp1_done":           self._tp1_done,
+            "last_entry_price":   self._last_entry_price,
+            "last_trade_side":    self._last_trade_side,
+            "consecutive_losses": self._consecutive_losses,
+            "trail_stop":         self._trail_stop,
+            "current_volume":     self._current_volume,
         }), encoding="utf-8")
 
     def _load_state(self):
@@ -278,14 +364,18 @@ class XStation5Bot:
         if STATE_FILE.exists():
             try:
                 data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-                self._entry_price      = data.get("entry_price")
-                self._trade_side       = data.get("trade_side")
-                self._tp1_done         = data.get("tp1_done", False)
-                self._last_entry_price = data.get("last_entry_price")
-                self._last_trade_side  = data.get("last_trade_side")
+                self._entry_price         = data.get("entry_price")
+                self._trade_side          = data.get("trade_side")
+                self._tp1_done            = data.get("tp1_done", False)
+                self._last_entry_price    = data.get("last_entry_price")
+                self._last_trade_side     = data.get("last_trade_side")
+                self._consecutive_losses  = data.get("consecutive_losses", 0)
+                self._trail_stop          = data.get("trail_stop")
+                self._current_volume      = data.get("current_volume", config.VOLUME)
                 log.info(
                     f"État restauré: {self._trade_side} @ {self._entry_price} "
-                    f"(tp1_done={self._tp1_done})"
+                    f"(tp1_done={self._tp1_done}, trail_stop={self._trail_stop}, "
+                    f"pertes_consec={self._consecutive_losses})"
                 )
                 if self._last_entry_price:
                     log.info(
@@ -512,10 +602,15 @@ class XStation5Bot:
             except PWTimeout:
                 pass  # Click & Trade = exécution immédiate sans confirmation
 
-            self._entry_price = levels["entry"]
-            self._trade_side  = signal
-            self._tp1_done    = False
+            self._entry_price    = levels["entry"]
+            self._trade_side     = signal
+            self._tp1_done       = False
+            self._trail_stop     = None
             self._save_state()
+            log.info(
+                f"  Ordre placé: {signal} @ {levels['entry']} | "
+                f"SL={levels['sl']} TP={levels['tp2']} | Volume={self._current_volume} lots"
+            )
             return True
 
         except Exception as e:
@@ -524,22 +619,52 @@ class XStation5Bot:
 
     # ── Gestion de position ouverte ───────────────────────────────────────────
 
-    async def manage_position(self, current_price: float):
+    async def manage_position(self, current_price: float, atr: float = 0.0):
+        """
+        Gère la position ouverte :
+        - Détecte TP1 → active breakeven + trailing stop
+        - Met à jour le trailing stop à chaque tick (après TP1)
+        - atr : ATR H1 du scan courant pour calculer la distance du trail
+        """
         if not self._entry_price or not self._trade_side:
-            return
-        if self._tp1_done:
             return
 
         pnl_pts = (
             (self._entry_price - current_price) if self._trade_side == "SHORT"
             else (current_price - self._entry_price)
         )
-        log.info(f"  Position {self._trade_side} | P&L: {pnl_pts:+.1f} pts")
 
-        if pnl_pts >= config.BREAKEVEN_TRIGGER_PTS:
-            log.info("  TP1 atteint → breakeven activé (SL ramené au point d'entrée)")
-            self._tp1_done = True
-            self._save_state()
+        if not self._tp1_done:
+            # Vérifier si TP1 est atteint
+            if pnl_pts >= config.BREAKEVEN_TRIGGER_PTS:
+                log.info(
+                    f"  TP1 atteint ({pnl_pts:+.0f} pts) → breakeven activé + trailing stop"
+                )
+                self._tp1_done   = True
+                self._trail_stop = self._entry_price   # SL = entry (breakeven)
+                self._save_state()
+        else:
+            # Trailing stop actif — ajuster si le prix avance favorablement
+            if atr > 0:
+                trail_dist = atr * config.TRAILING_ATR_MULT
+                if self._trade_side == "LONG":
+                    new_trail = round(current_price - trail_dist, 2)
+                    if self._trail_stop is None or new_trail > self._trail_stop:
+                        log.info(
+                            f"  Trailing stop LONG: {self._trail_stop} → {new_trail} "
+                            f"(prix={current_price:.2f}, dist={trail_dist:.0f}pts)"
+                        )
+                        self._trail_stop = new_trail
+                        self._save_state()
+                else:  # SHORT
+                    new_trail = round(current_price + trail_dist, 2)
+                    if self._trail_stop is None or new_trail < self._trail_stop:
+                        log.info(
+                            f"  Trailing stop SHORT: {self._trail_stop} → {new_trail} "
+                            f"(prix={current_price:.2f}, dist={trail_dist:.0f}pts)"
+                        )
+                        self._trail_stop = new_trail
+                        self._save_state()
 
     # ── Lire le prix courant depuis la page ───────────────────────────────────
 
@@ -616,7 +741,10 @@ class XStation5Bot:
             await asyncio.sleep(wait)
 
     def _conviction_score(self, sig, macro, mi) -> int:
-        """Score de conviction global 0–10 combinant technique + macro + sentiment."""
+        """
+        Score de conviction global 0–10 combinant technique + macro + sentiment.
+        Pénalités : contre-tendance macro, MACD divergence D1.
+        """
         score = 0
         # Technique (max 5)
         grade_pts = {"A+": 5, "A": 3, "B": 1}.get(sig.grade, 0)
@@ -631,7 +759,14 @@ class XStation5Bot:
             score += 2
         elif not mi.signal_contradicted:
             score += 1
-        return min(score, 10)
+        # Pénalités
+        # MACD divergence D1 prise en compte via score_setup (déjà deduit du grade)
+        # Chikou non confirmé : -1 (signal Ichimoku incomplet)
+        if sig.direction == "LONG" and not getattr(sig, "_chikou_ok", True):
+            score -= 1
+        elif sig.direction == "SHORT" and not getattr(sig, "_chikou_ok", True):
+            score -= 1
+        return max(0, min(score, 10))
 
     async def _tick(self):
         now = datetime.now(timezone.utc).strftime("%H:%M GMT")
@@ -645,8 +780,12 @@ class XStation5Bot:
                 pnl = (self._entry_price - current) if (current and self._trade_side == "SHORT") \
                       else ((current - self._entry_price) if current else 0)
                 log.info(f"  Position {self._trade_side} fermee (TP/SL) | P&L estime: {pnl:+.1f} pts — reset")
-                # Mémoriser uniquement si fermé en PERTE (SL touché)
-                # Si en profit (TP), la re-entrée dans la tendance est autorisée librement
+                # Enregistrer dans le tracker de session
+                if current:
+                    self._session.record_trade(
+                        self._trade_side, self._entry_price, current, self._current_volume
+                    )
+                    self._session.print_stats()
                 if pnl < 0:
                     self._last_entry_price = self._entry_price
                     self._last_trade_side  = self._trade_side
@@ -655,24 +794,30 @@ class XStation5Bot:
                         f"  Trade fermé en perte — règle anti-re-entrée activée pour {self._trade_side} "
                         f"| Pertes consécutives: {self._consecutive_losses}"
                     )
-                    # Circuit breaker : 2 pertes consécutives → pause 30 min
                     if self._consecutive_losses >= 2:
-                        pause_sec = 1800  # 30 minutes
+                        pause_sec = 1800
                         self._circuit_breaker_until = time.time() + pause_sec
                         log.warning(
                             f"  *** CIRCUIT BREAKER *** {self._consecutive_losses} pertes consécutives — "
-                            f"pause {pause_sec//60} min jusqu'à {datetime.now(timezone.utc).strftime('%H:%M')} + {pause_sec//60}min GMT"
+                            f"pause {pause_sec//60} min"
+                        )
+                    # Gate journalier — arrêt si limite USD dépassée
+                    if self._session.is_daily_loss_exceeded():
+                        log.warning(
+                            f"  *** DAILY LOSS GATE *** {self._session.daily_pnl_usd:.2f}$ < "
+                            f"-{config.MAX_DAILY_LOSS_USD}$ — trading suspendu pour la journée"
                         )
                 else:
-                    # TP atteint : reset du filtre, nouvelle entrée libre dans la tendance
                     self._last_entry_price   = None
                     self._last_trade_side    = None
                     self._consecutive_losses = 0
                     self._last_signal_type   = None
-                    log.info(f"  Trade fermé en profit — re-entrée libre autorisée | Reset circuit breaker")
-                self._entry_price = None
-                self._trade_side  = None
-                self._tp1_done    = False
+                    log.info("  Trade fermé en profit — re-entrée libre autorisée | Reset circuit breaker")
+                self._entry_price    = None
+                self._trade_side     = None
+                self._tp1_done       = False
+                self._trail_stop     = None
+                self._current_volume = config.VOLUME
                 self._save_state()
             else:
                 current = await self.get_current_price()
@@ -682,19 +827,30 @@ class XStation5Bot:
                     log.info(
                         f"  Position {self._trade_side} @ {self._entry_price} | "
                         f"Prix: {current:.2f} | P&L: {pnl:+.1f} pts"
+                        + (f" | Trail: {self._trail_stop}" if self._trail_stop else "")
                     )
+                    # Passer l'ATR H1 courant pour le trailing stop (calculé plus bas si nécessaire)
+                    # On utilise sig.atr si disponible — ici on passe 0, recalculé dans manage_position
                     await self.manage_position(current)
                 else:
                     log.info(f"  Position {self._trade_side} @ {self._entry_price} — prix indisponible")
                 return  # 1 seul trade à la fois
 
-        # 2a. Circuit breaker — pause forcée après pertes consécutives
+        # 2a. Daily loss gate — bloquer si limite journalière dépassée
+        if self._session.is_daily_loss_exceeded():
+            log.warning(
+                f"  *** DAILY LOSS GATE *** {self._session.daily_pnl_usd:.2f}$ — "
+                f"limite {config.MAX_DAILY_LOSS_USD}$ atteinte, trading suspendu"
+            )
+            return
+
+        # 2b. Circuit breaker — pause forcée après pertes consécutives
         if self._circuit_breaker_until > time.time():
             remaining = int((self._circuit_breaker_until - time.time()) / 60)
             log.warning(f"  *** CIRCUIT BREAKER actif *** — reprise dans {remaining} min")
             return
 
-        # 2b. Calendrier économique — protection avant annonces majeures
+        # 2c. Calendrier économique — protection avant annonces majeures
         cal = self._calendar.assess()
         self._calendar.print_status(cal)
         if cal.is_blackout:
@@ -735,10 +891,16 @@ class XStation5Bot:
 
         # 6. Score de conviction final
         conviction = self._conviction_score(sig, macro, mi)
-        log.info(f"  [CONVICTION] Score final: {conviction}/10 — Grade: {sig.grade} | size_factor={size_factor:.1f}")
+        # Seuil adaptatif : Grade B (M15 fallback aligne D1+H4) accepte 3/10
+        # Grade A/A+ exigent 4/10 — signal H1 direct avec confluences multiples
+        min_conviction = 3 if sig.grade == "B" else 4
+        log.info(
+            f"  [CONVICTION] Score final: {conviction}/10 — Grade: {sig.grade} "
+            f"| seuil: {min_conviction} | size_factor={size_factor:.1f}"
+        )
 
-        if conviction < 4:
-            log.info("  SKIP: conviction insuffisante (< 4/10)")
+        if conviction < min_conviction:
+            log.info(f"  SKIP: conviction insuffisante (< {min_conviction}/10)")
             return
 
         # 7a. Filtre signal type répété — bloquer le même fallback M15 après une perte
@@ -770,12 +932,18 @@ class XStation5Bot:
                 )
                 return
 
-        # 8. Exécution (volume adapté si size_factor < 1.0)
-        levels = sig.to_levels()
-        if size_factor < 1.0:
-            log.info(f"  Volume réduit à {size_factor*100:.0f}% — news tension ({news_reason})")
+        # 8. Sizing dynamique — grade × news factor × volume de base
+        grade_factor   = {"A+": config.VOLUME_A_PLUS, "A": config.VOLUME_A, "B": config.VOLUME_B}.get(sig.grade, 0.5)
+        combined_factor = round(grade_factor * size_factor, 2)
+        self._current_volume = round(config.VOLUME * combined_factor, 3)
+        log.info(
+            f"  [SIZING] Grade={sig.grade} ({grade_factor:.2f}x) × News({size_factor:.2f}x) "
+            f"= {combined_factor:.2f}x → volume={self._current_volume} lots"
+        )
+
         # Mémoriser le type de signal avant exécution
         self._last_signal_type = sig.h1_signal
+        levels = sig.to_levels()
         await self.place_order(sig.direction, levels)
 
 

@@ -176,12 +176,14 @@ def _adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
     return dx.ewm(span=period, adjust=False).mean()
 
 def _ichimoku(df: pd.DataFrame) -> pd.DataFrame:
-    hi, lo = df["High"], df["Low"]
+    hi, lo, cl = df["High"], df["Low"], df["Close"]
     t  = (hi.rolling(config.TENKAN_PERIOD).max()    + lo.rolling(config.TENKAN_PERIOD).min())    / 2
     k  = (hi.rolling(config.KIJUN_PERIOD).max()     + lo.rolling(config.KIJUN_PERIOD).min())     / 2
     sa = ((t + k) / 2).shift(config.DISPLACEMENT)
     sb = ((hi.rolling(config.SENKOU_B_PERIOD).max() + lo.rolling(config.SENKOU_B_PERIOD).min()) / 2).shift(config.DISPLACEMENT)
-    return pd.DataFrame({"tenkan": t, "kijun": k, "sa": sa, "sb": sb})
+    # Chikou Span : close décalé en arrière de DISPLACEMENT périodes pour comparaison
+    chikou = cl.shift(-config.DISPLACEMENT)
+    return pd.DataFrame({"tenkan": t, "kijun": k, "sa": sa, "sb": sb, "chikou": chikou})
 
 
 # ── Analyse D1 — Biais directionnel ──────────────────────────────────────────
@@ -212,15 +214,45 @@ def analyze_d1(df: pd.DataFrame) -> dict:
     dist_200 = abs(last - e200) / e200 * 100
     strength = "FORT" if dist_200 > 5 else ("MODERE" if dist_200 > 2 else "FAIBLE")
 
+    # ── Détection divergence MACD D1 ─────────────────────────────────────────
+    # Bearish divergence : prix fait un nouveau sommet mais MACD fait un sommet plus bas
+    # → signal d'essoufflement haussier (pénalise les signaux LONG)
+    # Bullish divergence : prix fait un nouveau creux mais MACD fait un creux moins bas
+    # → signal d'essoufflement baissier (pénalise les signaux SHORT)
+    macd_divergence = "NONE"
+    try:
+        macd_h = _macd_hist(cl)
+        n = min(20, len(cl) - 2)
+        price_slice = cl.iloc[-n:]
+        macd_slice  = macd_h.iloc[-n:]
+        # Index du pic de prix dans la fenêtre récente (excluant la dernière barre)
+        peak_idx  = int(price_slice.iloc[:-1].values.argmax())
+        trough_idx = int(price_slice.iloc[:-1].values.argmin())
+        price_at_peak   = float(price_slice.iloc[peak_idx])
+        price_at_trough = float(price_slice.iloc[trough_idx])
+        macd_at_peak    = float(macd_slice.iloc[peak_idx])
+        macd_at_trough  = float(macd_slice.iloc[trough_idx])
+        macd_last = float(macd_h.iloc[-1])
+        price_last = float(cl.iloc[-1])
+        # Bearish div : prix >= ancien pic ET MACD < MACD au pic ET MACD > 0
+        if price_last >= price_at_peak * 0.998 and macd_last < macd_at_peak and macd_at_peak > 0:
+            macd_divergence = "BEARISH"
+        # Bullish div : prix <= ancien creux ET MACD > MACD au creux ET MACD < 0
+        elif price_last <= price_at_trough * 1.002 and macd_last > macd_at_trough and macd_at_trough < 0:
+            macd_divergence = "BULLISH"
+    except Exception:
+        pass  # Ne jamais bloquer l'analyse sur erreur indicateur
+
     return {
-        "bias":           "HAUSSIER" if bullish else ("BAISSIER" if bearish else "NEUTRE"),
-        "trend_strength": strength,
-        "ema20": round(e20, 2),
-        "ema50": round(e50, 2),
-        "price": round(last, 2),
-        "above_ema20": last > e20,
-        "hh_hl": hh and hl,
-        "lh_ll": lh and ll,
+        "bias":             "HAUSSIER" if bullish else ("BAISSIER" if bearish else "NEUTRE"),
+        "trend_strength":   strength,
+        "ema20":            round(e20, 2),
+        "ema50":            round(e50, 2),
+        "price":            round(last, 2),
+        "above_ema20":      last > e20,
+        "hh_hl":            hh and hl,
+        "lh_ll":            lh and ll,
+        "macd_divergence":  macd_divergence,
     }
 
 
@@ -412,6 +444,25 @@ def analyze_h1(df: pd.DataFrame) -> dict:
     kumo_bot = min(sa, sb)
     in_kumo  = kumo_bot <= cl <= kumo_top
 
+    # Chikou Span — close actuel vs prix 26 barres en arrière (confirmation institutionnelle)
+    # LONG  : Chikou > prix H-26 (momentum haussier confirmé dans le passé)
+    # SHORT : Chikou < prix H-26 (momentum baissier confirmé dans le passé)
+    disp = config.DISPLACEMENT  # 26
+    chikou_ref_idx = idx - disp  # idx=-2, donc -28 depuis la fin
+    if len(df) >= abs(chikou_ref_idx):
+        chikou_ref_price = float(df["Close"].iloc[chikou_ref_idx])
+        chikou_bullish = cl > chikou_ref_price
+        chikou_bearish = cl < chikou_ref_price
+    else:
+        chikou_ref_price = cl
+        chikou_bullish = chikou_bearish = False
+
+    # Cloud twist — direction du nuage (SA vs SB non décalés = future cloud)
+    # SA > SB → twist haussier (nuage futur bullish)  → confluence LONG
+    # SA < SB → twist baissier (nuage futur bearish)  → confluence SHORT
+    cloud_bullish_twist = sa > sb
+    cloud_bearish_twist = sa < sb
+
     # Signal primaire : toutes conditions Ichimoku réunies
     short_primary = (not in_kumo and cl < kumo_bot and t < k
                      and cl < t and r <= config.RSI_MAX and h < 0 and a >= config.ADX_MIN)
@@ -464,6 +515,13 @@ def analyze_h1(df: pd.DataFrame) -> dict:
         "adx":      round(a, 1),
         "atr":      round(atr_v, 1),
         "in_kumo":  in_kumo,
+        # Chikou Span
+        "chikou_bullish":    chikou_bullish,
+        "chikou_bearish":    chikou_bearish,
+        "chikou_ref_price":  round(chikou_ref_price, 2),
+        # Cloud twist
+        "cloud_bullish_twist": cloud_bullish_twist,
+        "cloud_bearish_twist": cloud_bearish_twist,
     }
 
 
@@ -549,6 +607,27 @@ def score_setup(
     if d1["trend_strength"] == "FORT":
         confluences.append("Tendance D1 forte")
 
+    # 12. Chikou Span (confirmation institutionnelle Ichimoku)
+    if direction == "LONG" and h1.get("chikou_bullish"):
+        confluences.append(f"Chikou Span haussier (> prix H-26)")
+    elif direction == "SHORT" and h1.get("chikou_bearish"):
+        confluences.append(f"Chikou Span baissier (< prix H-26)")
+    else:
+        warnings.append("Chikou Span non confirme — signal affaibli")
+
+    # 13. Cloud twist — direction du nuage futur (SA vs SB)
+    if direction == "LONG" and h1.get("cloud_bullish_twist"):
+        confluences.append("Cloud twist haussier (SA > SB)")
+    elif direction == "SHORT" and h1.get("cloud_bearish_twist"):
+        confluences.append("Cloud twist baissier (SA < SB)")
+
+    # 14. MACD divergence D1 — pénalité si divergence contre la direction
+    d1_divergence = d1.get("macd_divergence", "NONE")
+    if direction == "LONG" and d1_divergence == "BEARISH":
+        warnings.append("MACD divergence baissiere D1 — conviction -2")
+    elif direction == "SHORT" and d1_divergence == "BULLISH":
+        warnings.append("MACD divergence haussiere D1 — conviction -2")
+
     # ── Déductions ────────────────────────────────────────────────────────────
     score = len(confluences)
 
@@ -559,6 +638,13 @@ def score_setup(
     if direction == "LONG" and d1["bias"] == "BAISSIER":
         score -= 2
         warnings.append("ATTENTION: CONTRE-TENDANCE D1 — risque eleve")
+
+    # Pénalité MACD divergence D1
+    d1_divergence = d1.get("macd_divergence", "NONE")
+    if direction == "LONG" and d1_divergence == "BEARISH":
+        score -= 2
+    elif direction == "SHORT" and d1_divergence == "BULLISH":
+        score -= 2
 
     return max(0, score), confluences, warnings
 
@@ -643,7 +729,9 @@ def generate_pro_signal(mtf: dict[str, pd.DataFrame]) -> ProSignal:
                 sig.direction    = direction
                 sig.h1_signal    = f"M15-{direction}"
                 sig.skip_reasons = []
-                sig.atr          = m15["atr"] * 4   # ATR M15 × 4 ≈ ATR H1
+                # ATR H1 direct — SL/TP dimensionnés sur la timeframe d'exécution réelle
+                # (ATR M15 × 4 sous-estimait la volatilité H1, générant des SL trop serrés)
+                sig.atr          = float(_atr(df_h1).iloc[-1])
                 sig.kill_zone    = current_kill_zone()
                 # Confluences : M15 + D1 + H4 si alignes
                 sig.confluences.append(f"M15 {direction} (ADX={m15['adx']:.0f}, MACD={m15['macd']:.1f})")

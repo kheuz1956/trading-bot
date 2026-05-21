@@ -258,6 +258,10 @@ class XStation5Bot:
         self._macro       = MacroIntelligenceEngine()
         self._calendar    = EconomicCalendarEngine()
         self._surveillance = NewsSurveillanceEngine(scan_interval=120)
+        # Circuit breaker — protection contre pertes consecutives
+        self._consecutive_losses: int   = 0
+        self._circuit_breaker_until: float = 0.0   # timestamp unix
+        self._last_signal_type: str | None = None  # ex: "M15-SHORT"
 
     def _save_state(self):
         """Persiste l'état du trade en cours + dernier trade clôturé sur disque."""
@@ -646,12 +650,26 @@ class XStation5Bot:
                 if pnl < 0:
                     self._last_entry_price = self._entry_price
                     self._last_trade_side  = self._trade_side
-                    log.warning(f"  Trade fermé en perte — règle anti-re-entrée activée pour {self._trade_side}")
+                    self._consecutive_losses += 1
+                    log.warning(
+                        f"  Trade fermé en perte — règle anti-re-entrée activée pour {self._trade_side} "
+                        f"| Pertes consécutives: {self._consecutive_losses}"
+                    )
+                    # Circuit breaker : 2 pertes consécutives → pause 30 min
+                    if self._consecutive_losses >= 2:
+                        pause_sec = 1800  # 30 minutes
+                        self._circuit_breaker_until = time.time() + pause_sec
+                        log.warning(
+                            f"  *** CIRCUIT BREAKER *** {self._consecutive_losses} pertes consécutives — "
+                            f"pause {pause_sec//60} min jusqu'à {datetime.now(timezone.utc).strftime('%H:%M')} + {pause_sec//60}min GMT"
+                        )
                 else:
                     # TP atteint : reset du filtre, nouvelle entrée libre dans la tendance
-                    self._last_entry_price = None
-                    self._last_trade_side  = None
-                    log.info(f"  Trade fermé en profit — re-entrée libre autorisée")
+                    self._last_entry_price   = None
+                    self._last_trade_side    = None
+                    self._consecutive_losses = 0
+                    self._last_signal_type   = None
+                    log.info(f"  Trade fermé en profit — re-entrée libre autorisée | Reset circuit breaker")
                 self._entry_price = None
                 self._trade_side  = None
                 self._tp1_done    = False
@@ -670,7 +688,13 @@ class XStation5Bot:
                     log.info(f"  Position {self._trade_side} @ {self._entry_price} — prix indisponible")
                 return  # 1 seul trade à la fois
 
-        # 2. Calendrier économique — protection avant annonces majeures
+        # 2a. Circuit breaker — pause forcée après pertes consécutives
+        if self._circuit_breaker_until > time.time():
+            remaining = int((self._circuit_breaker_until - time.time()) / 60)
+            log.warning(f"  *** CIRCUIT BREAKER actif *** — reprise dans {remaining} min")
+            return
+
+        # 2b. Calendrier économique — protection avant annonces majeures
         cal = self._calendar.assess()
         self._calendar.print_status(cal)
         if cal.is_blackout:
@@ -717,7 +741,18 @@ class XStation5Bot:
             log.info("  SKIP: conviction insuffisante (< 4/10)")
             return
 
-        # 7. Filtre re-entrée défavorable
+        # 7a. Filtre signal type répété — bloquer le même fallback M15 après une perte
+        current_signal_type = sig.h1_signal  # ex: "M15-SHORT", "M15-LONG", ou signal H1
+        if (self._last_signal_type and
+                self._last_signal_type == current_signal_type and
+                self._consecutive_losses > 0):
+            log.warning(
+                f"  SKIP signal répété après perte: {current_signal_type} déjà tenté et perdu — "
+                f"attendre un nouveau setup différent"
+            )
+            return
+
+        # 7b. Filtre re-entrée défavorable
         # LONG  : n'ouvre pas si nouvel entry > dernier entry LONG  (on n'achète pas plus cher)
         # SHORT : n'ouvre pas si nouvel entry < dernier entry SHORT (on ne vend pas moins cher)
         new_entry = sig.to_levels()["entry"]
@@ -739,6 +774,8 @@ class XStation5Bot:
         levels = sig.to_levels()
         if size_factor < 1.0:
             log.info(f"  Volume réduit à {size_factor*100:.0f}% — news tension ({news_reason})")
+        # Mémoriser le type de signal avant exécution
+        self._last_signal_type = sig.h1_signal
         await self.place_order(sig.direction, levels)
 
 

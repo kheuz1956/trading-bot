@@ -29,7 +29,7 @@ VOLUME_B      = 0.50   # Grade B  : 50% (M15 fallback, risque plus élevé)
 TRAILING_ATR_MULT = 0.5   # trail SL = prix courant ± (ATR × 0.5)
 
 # ─── Timing ──────────────────────────────────────────────────────────────────
-SCAN_INTERVAL_SEC = 300   # analyse toutes les 5 minutes
+SCAN_INTERVAL_SEC = 60    # analyse toutes les 60 secondes (mode HFT)
 CANDLES_NEEDED    = 150   # bougies H1 à charger (≥ 52+26 pour Ichimoku)
 
 # ─── Session filter (UTC) ────────────────────────────────────────────────────
@@ -66,3 +66,11 @@ RSI_MIN    = 30  # en-dessous → skip short
 MACD_FAST   = 12
 MACD_SLOW   = 26
 MACD_SIGNAL = 9
+
+# ─── Mode scalping haute fréquence (M5) ──────────────────────────────────────
+SCALP_MODE         = True   # Active le chemin M5 scalp dans generate_pro_signal
+SCALP_ATR_SL_MULT  = 0.8   # SL scalp = entry ± ATR×0.8 (serré)
+SCALP_ATR_TP1_MULT = 1.0   # TP1 scalp = entry ± ATR×1.0
+SCALP_ATR_TP2_MULT = 1.8   # TP2 scalp = entry ± ATR×1.8  (R:R ~1:2.25)
+SCALP_MIN_RR       = 1.2   # R:R minimum scalp (assoupli vs swing 1.5)
+SCALP_ADX_MIN      = 18    # ADX minimum M5 (signal momentum suffisant)

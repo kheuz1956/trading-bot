@@ -117,6 +117,7 @@ def load_mtf() -> dict[str, pd.DataFrame]:
         "H4":  _download("30d", "4h"),
         "H1":  _download("5d",  "1h"),
         "M15": _download("2d",  "15m"),
+        "M5":  _download("1d",  "5m"),
     }
 
 
@@ -149,6 +150,73 @@ def analyze_m15(df: pd.DataFrame) -> dict:
         "adx":   round(float(adx_v),  1),
         "rsi":   round(float(rsi_v),  1),
         "atr":   round(float(atr_v),  1),
+    }
+
+
+def analyze_m5(df: pd.DataFrame) -> dict:
+    """
+    Signal scalping M5 — EMA 5/13/34 + MACD + ADX + momentum 3/5 bougies.
+    Conditions plus souples qu'en H1 (ADX >= SCALP_ADX_MIN, RSI 25-75).
+    Utilisé uniquement si config.SCALP_MODE=True et que H1+M15 sont SKIP.
+    """
+    if df is None or len(df) < 40:
+        return {"signal": "SKIP", "reason": "Donnees M5 insuffisantes"}
+
+    cl  = df["Close"]
+    op  = df["Open"]
+    e5  = _ema(cl, 5).iloc[-2]
+    e13 = _ema(cl, 13).iloc[-2]
+    e34 = _ema(cl, 34).iloc[-2]
+    macd_h = _macd_hist(cl).iloc[-2]
+    adx_v  = _adx(df).iloc[-2]
+    rsi_v  = _rsi(cl).iloc[-2]
+    atr_v  = _atr(df).iloc[-1]
+    last   = float(cl.iloc[-2])
+
+    # Momentum : 3 des 5 dernières bougies M5 fermées dans la direction
+    m5_cl  = cl.iloc[-6:-1]
+    m5_op  = op.iloc[-6:-1]
+    bull_n = int((m5_cl > m5_op).sum())
+    bear_n = 5 - bull_n
+
+    long_ok  = (
+        last > e5 > e13
+        and macd_h > 0
+        and adx_v >= config.SCALP_ADX_MIN
+        and rsi_v < 72
+        and bull_n >= 3
+    )
+    short_ok = (
+        last < e5 < e13
+        and macd_h < 0
+        and adx_v >= config.SCALP_ADX_MIN
+        and rsi_v > 28
+        and bear_n >= 3
+    )
+
+    direction = "LONG" if long_ok else ("SHORT" if short_ok else "SKIP")
+    reason = ""
+    if direction == "SKIP":
+        if adx_v < config.SCALP_ADX_MIN:
+            reason = f"ADX M5 trop faible ({adx_v:.0f} < {config.SCALP_ADX_MIN})"
+        elif bull_n < 3 and bear_n < 3:
+            reason = f"Momentum M5 insuffisant ({bull_n}/5 bull, {bear_n}/5 bear)"
+        else:
+            reason = "Pas d'alignement EMA5/13 + MACD M5"
+
+    return {
+        "signal":   direction,
+        "close":    round(last, 2),
+        "ema5":     round(float(e5),  2),
+        "ema13":    round(float(e13), 2),
+        "ema34":    round(float(e34), 2),
+        "macd":     round(float(macd_h), 3),
+        "adx":      round(float(adx_v),  1),
+        "rsi":      round(float(rsi_v),  1),
+        "atr":      round(float(atr_v),  1),
+        "bull_n":   bull_n,
+        "bear_n":   bear_n,
+        "reason":   reason,
     }
 
 
@@ -1111,10 +1179,11 @@ def generate_pro_signal(mtf: dict[str, pd.DataFrame]) -> ProSignal:
     Génère un signal professionnel multi-timeframe avec scoring de confluences.
     Retourne un ProSignal avec grade A+/A/B/SKIP.
     """
-    df_d1 = mtf.get("D1", pd.DataFrame())
-    df_h4 = mtf.get("H4", pd.DataFrame())
-    df_h1 = mtf.get("H1", pd.DataFrame())
+    df_d1  = mtf.get("D1",  pd.DataFrame())
+    df_h4  = mtf.get("H4",  pd.DataFrame())
+    df_h1  = mtf.get("H1",  pd.DataFrame())
     df_m15 = mtf.get("M15", pd.DataFrame())
+    df_m5  = mtf.get("M5",  pd.DataFrame())
 
     sig = ProSignal()
 
@@ -1168,54 +1237,134 @@ def generate_pro_signal(mtf: dict[str, pd.DataFrame]) -> ProSignal:
                         f"  [M15 FALLBACK] BLOQUE — {m15_dir} contre tendance D1 {d1_bias} "
                         f"(ADX={m15['adx']:.0f}) — contre-tendance interdite"
                     )
-                    sig.direction = "SKIP"
-                    return sig
-
-                if h4_blocks:
+                    # Ne pas return : laisser le chemin M5 scalp tenter sa chance
+                elif h4_blocks:
                     log.warning(
                         f"  [M15 FALLBACK] BLOQUE — {m15_dir} contre structure H4 {h4_bias} "
                         f"(ADX={m15['adx']:.0f}) — alignement requis"
                     )
-                    sig.direction = "SKIP"
+                    # Ne pas return : laisser le chemin M5 scalp tenter sa chance
+                else:
+                    # M15 aligne avec D1 et H4 — signal valide
+                    direction        = m15_dir
+                    sig.direction    = direction
+                    sig.h1_signal    = f"M15-{direction}"
+                    sig.skip_reasons = []
+                    sig.atr          = float(_atr(df_h1).iloc[-1])
+                    sig.kill_zone    = current_kill_zone()
+                    sig.confluences.append(f"M15 {direction} (ADX={m15['adx']:.0f}, MACD={m15['macd']:.1f})")
+                    if d1_bias == direction:
+                        sig.confluences.append(f"D1 biais {d1_bias} confirme")
+                    if h4_bias == direction:
+                        sig.confluences.append(f"H4 structure {h4_bias} alignee")
+                    sig.grade = "B"
+                    price = m15["close"]
+                    atr_h = sig.atr
+                    if direction == "LONG":
+                        sig.entry = price
+                        sig.sl    = round(price - atr_h * 1.0, 2)
+                        sig.tp1   = round(price + atr_h * 1.0, 2)
+                        sig.tp2   = round(price + atr_h * 2.0, 2)
+                        sig.tp3   = round(price + atr_h * 3.0, 2)
+                    else:
+                        sig.entry = price
+                        sig.sl    = round(price + atr_h * 1.0, 2)
+                        sig.tp1   = round(price - atr_h * 1.0, 2)
+                        sig.tp2   = round(price - atr_h * 2.0, 2)
+                        sig.tp3   = round(price - atr_h * 3.0, 2)
+                    log.info(
+                        f"  [M15 FALLBACK] {direction} valide — D1:{d1_bias} H4:{h4_bias} "
+                        f"ADX={m15['adx']:.0f} MACD={m15['macd']:.1f}"
+                    )
                     return sig
 
-                # M15 aligne avec D1 et H4 — signal valide
-                direction        = m15_dir
-                sig.direction    = direction
-                sig.h1_signal    = f"M15-{direction}"
-                sig.skip_reasons = []
-                # ATR H1 direct — SL/TP dimensionnés sur la timeframe d'exécution réelle
-                # (ATR M15 × 4 sous-estimait la volatilité H1, générant des SL trop serrés)
-                sig.atr          = float(_atr(df_h1).iloc[-1])
-                sig.kill_zone    = current_kill_zone()
-                # Confluences : M15 + D1 + H4 si alignes
-                sig.confluences.append(f"M15 {direction} (ADX={m15['adx']:.0f}, MACD={m15['macd']:.1f})")
-                if d1_bias == direction:
-                    sig.confluences.append(f"D1 biais {d1_bias} confirme")
-                if h4_bias == direction:
-                    sig.confluences.append(f"H4 structure {h4_bias} alignee")
+        # ── Chemin scalp M5 (HFT) ─────────────────────────────────────────────
+        # Activé si : SCALP_MODE=True ET M15 fallback a échoué ET M5 disponible
+        if config.SCALP_MODE and df_m5 is not None and not df_m5.empty:
+            m5 = analyze_m5(df_m5)
+            if m5["signal"] != "SKIP":
+                m5_dir = m5["signal"]
+                d1_bias = d1.get("bias", "NEUTRE")
 
-                # Grade B (signal fallback) — exige alignement macro fort pour atteindre seuil conviction
-                sig.grade = "B"
-                price = m15["close"]
-                atr_h = sig.atr
-                if direction == "LONG":
-                    sig.entry = price
-                    sig.sl    = round(price - atr_h * 1.0, 2)
-                    sig.tp1   = round(price + atr_h * 1.0, 2)
-                    sig.tp2   = round(price + atr_h * 2.0, 2)
-                    sig.tp3   = round(price + atr_h * 3.0, 2)
+                # Filtre directionnel minimal : M5 ne doit pas contredire D1 fort
+                d1_blocks = (d1_bias != "NEUTRE" and d1_bias != m5_dir)
+                if d1_blocks:
+                    log.warning(
+                        f"  [M5 SCALP] BLOQUE — {m5_dir} contre D1 {d1_bias}"
+                    )
                 else:
-                    sig.entry = price
-                    sig.sl    = round(price + atr_h * 1.0, 2)
-                    sig.tp1   = round(price - atr_h * 1.0, 2)
-                    sig.tp2   = round(price - atr_h * 2.0, 2)
-                    sig.tp3   = round(price - atr_h * 3.0, 2)
-                log.info(
-                    f"  [M15 FALLBACK] {direction} valide — D1:{d1_bias} H4:{h4_bias} "
-                    f"ADX={m15['adx']:.0f} MACD={m15['macd']:.1f}"
-                )
-                return sig
+                    # H4 optionnel : si H4 est défini, préférer l'alignement
+                    h4_bias = "NEUTRE"
+                    if not df_h4.empty and len(df_h4) >= 20:
+                        h4_cl  = df_h4["Close"]
+                        h4_ichi = _ichimoku(df_h4)
+                        h4_last = float(h4_cl.iloc[-2])
+                        h4_sa   = float(((h4_ichi["tenkan"] + h4_ichi["kijun"]) / 2).iloc[-2])
+                        h4_sb   = float(((df_h4["High"].rolling(52).max() + df_h4["Low"].rolling(52).min()) / 2).iloc[-2])
+                        h4_top  = max(h4_sa, h4_sb)
+                        h4_bot  = min(h4_sa, h4_sb)
+                        if h4_last > h4_top:
+                            h4_bias = "LONG"
+                        elif h4_last < h4_bot:
+                            h4_bias = "SHORT"
+
+                    h4_blocks = (h4_bias != "NEUTRE" and h4_bias != m5_dir)
+                    if h4_blocks:
+                        log.warning(
+                            f"  [M5 SCALP] BLOQUE — {m5_dir} contre H4 {h4_bias}"
+                        )
+                    else:
+                        # Signal M5 scalp validé
+                        atr_m5 = m5["atr"]
+                        price  = m5["close"]
+                        if m5_dir == "LONG":
+                            entry = price
+                            sl    = round(entry - atr_m5 * config.SCALP_ATR_SL_MULT, 2)
+                            tp1   = round(entry + atr_m5 * config.SCALP_ATR_TP1_MULT, 2)
+                            tp2   = round(entry + atr_m5 * config.SCALP_ATR_TP2_MULT, 2)
+                        else:
+                            entry = price
+                            sl    = round(entry + atr_m5 * config.SCALP_ATR_SL_MULT, 2)
+                            tp1   = round(entry - atr_m5 * config.SCALP_ATR_TP1_MULT, 2)
+                            tp2   = round(entry - atr_m5 * config.SCALP_ATR_TP2_MULT, 2)
+
+                        risk   = abs(sl - entry)
+                        reward = abs(tp2 - entry)
+                        rr_val = reward / max(risk, 0.01)
+
+                        if rr_val >= config.SCALP_MIN_RR:
+                            sig.direction   = m5_dir
+                            sig.h1_signal   = f"M5-SCALP-{m5_dir}"
+                            sig.grade       = "B"
+                            sig.entry       = entry
+                            sig.sl          = sl
+                            sig.tp1         = tp1
+                            sig.tp2         = tp2
+                            sig.tp3         = round(entry + atr_m5 * config.SCALP_ATR_TP2_MULT * 1.5 * (1 if m5_dir == "LONG" else -1), 2)
+                            sig.atr         = atr_m5
+                            sig.rr          = f"1:{round(rr_val, 1)}"
+                            sig.kill_zone   = current_kill_zone()
+                            sig.skip_reasons = []
+                            sig.confluences.append(
+                                f"M5 SCALP {m5_dir} — EMA5/13 + MACD={m5['macd']:+.3f} "
+                                f"ADX={m5['adx']:.0f} RSI={m5['rsi']:.0f} "
+                                f"({m5['bull_n'] if m5_dir=='LONG' else m5['bear_n']}/5 bougies)"
+                            )
+                            if d1_bias == m5_dir:
+                                sig.confluences.append(f"D1 biais {d1_bias} confirme")
+                            if h4_bias == m5_dir:
+                                sig.confluences.append(f"H4 structure {h4_bias} alignee")
+                            log.info(
+                                f"  [M5 SCALP] {m5_dir} valide — D1:{d1_bias} H4:{h4_bias} "
+                                f"ADX={m5['adx']:.0f} MACD={m5['macd']:+.3f} R:R={rr_val:.1f} "
+                                f"Entry={entry} SL={sl} TP2={tp2}"
+                            )
+                            return sig
+                        else:
+                            log.info(f"  [M5 SCALP] R:R insuffisant ({rr_val:.2f} < {config.SCALP_MIN_RR})")
+            else:
+                log.info(f"  [M5 SCALP] SKIP — {m5.get('reason', 'pas de signal')}")
+
         sig.direction = "SKIP"
         return sig
 

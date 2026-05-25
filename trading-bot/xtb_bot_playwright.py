@@ -465,17 +465,46 @@ class XStation5Bot:
         await pass_input.fill(config.PASSWORD)
         await asyncio.sleep(0.3)
 
-        # Cliquer le bouton login (premier bouton visible et non-désactivé)
-        submitted = await p.evaluate("""() => {
-            const btn = Array.from(document.querySelectorAll('button'))
-                .find(b => b.offsetParent !== null && !b.disabled);
-            if (btn) { btn.click(); return btn.innerText.trim().slice(0, 30); }
-            return false;
-        }""")
-        log.info(f"  Bouton cliqué: '{submitted}'")
+        # Attendre que le formulaire Angular soit pleinement interactif
+        await asyncio.sleep(1.5)
 
-        # Fallback : Enter
+        # Stratégie multi-tentatives pour cliquer le bouton submit Angular
+        submitted = None
+
+        # Tentative 1 : bouton submit explicite
+        submitted = await p.evaluate("""() => {
+            const selectors = [
+                'button[type="submit"]',
+                'button.login-btn',
+                'button.btn-primary',
+                'form button:not([disabled])',
+            ];
+            for (const sel of selectors) {
+                const btn = document.querySelector(sel);
+                if (btn && btn.offsetParent !== null) {
+                    btn.click();
+                    return btn.innerText.trim().slice(0, 30) || 'submit';
+                }
+            }
+            return null;
+        }""")
+
+        # Tentative 2 : dispatchEvent natif Angular (bypasse les guards ng-click)
         if not submitted:
+            submitted = await p.evaluate("""() => {
+                const btn = Array.from(document.querySelectorAll('button'))
+                    .find(b => !b.disabled && b.offsetParent !== null
+                               && !b.classList.contains('close'));
+                if (!btn) return null;
+                btn.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
+                return btn.innerText.trim().slice(0, 30) || 'dispatched';
+            }""")
+
+        log.info(f"  Bouton login cliqué: '{submitted}'")
+
+        # Tentative 3 : Enter sur le champ password
+        if not submitted:
+            log.warning("  Bouton introuvable — fallback Enter sur password")
             await pass_input.press("Enter")
 
         try:

@@ -609,22 +609,33 @@ class NewsSurveillanceEngine:
             # Lancer un scan rapide des sources prioritaires
             report = await self._quick_scan()
 
+        # ABORT / PAUSE → blocage total (crise ou sentiment effondré)
         if report.trade_action in ("ABORT", "PAUSE"):
             return False, report.block_reason, 0.0
 
-        # Vérification directionnelle
-        if direction == "LONG" and report.regime == "RISK_OFF" and report.composite_score < -0.3:
-            return False, f"Sentiment RISK_OFF ({report.composite_score:.2f}) — signal LONG bloqué", 0.0
+        # REDUCE → autoriser avec volume réduit (news tendu mais pas critique)
+        # Ne pas bloquer directionnellement sur REDUCE — la décision appartient
+        # au scoring technique + conviction, pas à la surveillance seule.
+        # Bloquer uniquement si le score est proche de PAUSE (< -0.45) ET
+        # que le biais directionnel va clairement contre le sentiment.
+        if direction == "LONG" and report.composite_score < -0.45:
+            return False, f"Sentiment trop negatif ({report.composite_score:.2f}) — attendre amelioration", 0.0
 
-        if direction == "SHORT" and report.regime == "RISK_ON" and report.composite_score > 0.3:
-            return (
-                True,
-                f"Avertissement: sentiment RISK_ON mais signal SHORT maintenu (conviction requise)",
-                0.7,
-            )
+        if direction == "SHORT" and report.composite_score > 0.45:
+            return False, f"Sentiment trop positif ({report.composite_score:.2f}) — attendre correction", 0.0
 
+        # Ajustement du facteur selon la tension residuelle
         factor = report.trade_size_factor
-        reason = report.block_reason or f"OK ({report.regime}, score={report.composite_score:+.2f})"
+        if direction == "LONG" and report.composite_score < -0.30:
+            # Score entre -0.30 et -0.45 : LONG autorise mais volume reduit a 70%
+            factor = min(factor, 0.7)
+            reason = f"LONG sous tension modere ({report.composite_score:+.2f}) — volume {factor*100:.0f}%"
+        elif direction == "SHORT" and report.composite_score > 0.30:
+            factor = min(factor, 0.7)
+            reason = f"SHORT contre sentiment haussier ({report.composite_score:+.2f}) — volume {factor*100:.0f}%"
+        else:
+            reason = report.block_reason or f"OK ({report.regime}, score={report.composite_score:+.2f})"
+
         return True, reason, factor
 
     async def _quick_scan(self) -> SurveillanceReport:

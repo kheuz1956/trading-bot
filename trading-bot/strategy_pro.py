@@ -33,9 +33,14 @@ KILL_ZONES = {
 }
 
 # ── Score minimal pour ouvrir un trade ────────────────────────────────────────
-MIN_SCORE_A_PLUS = 5   # A+ setup : exécution immédiate
+MIN_SCORE_A_PLUS = 5   # A+ setup : exécution immédiate (confluences maximales)
 MIN_SCORE_A      = 3   # A setup  : exécution normale
-MIN_SCORE_B      = 2   # B setup  : skip (sauf si config.ALLOW_B_SETUP=True)
+MIN_SCORE_B      = 3   # B setup  : seuil relevé 2→3 (filtrage plus strict)
+
+# ── Filtre de proximité entrée ─────────────────────────────────────────────────
+# Bloque le trade si le prix actuel est à plus de MAX_ENTRY_SLIPPAGE_ATR × ATR
+# de l'entrée calculée (évite d'entrer trop loin d'un niveau technique clé)
+MAX_ENTRY_SLIPPAGE_ATR = 0.4   # 40% de l'ATR maximum de slippage acceptable
 
 
 # ── Dataclass signal ──────────────────────────────────────────────────────────
@@ -78,22 +83,31 @@ class ProSignal:
 
 # ── Chargement multi-timeframe ────────────────────────────────────────────────
 
+_TICKERS = ["NQ=F", "^NDX", "QQQ"]  # fallback chain si yfinance indisponible
+
 def _download(period: str, interval: str) -> pd.DataFrame:
-    raw = yf.download("NQ=F", period=period, interval=interval,
-                      progress=False, auto_adjust=True)
-    if raw.empty:
-        return pd.DataFrame()
-    if isinstance(raw.columns, pd.MultiIndex):
-        raw.columns = raw.columns.get_level_values(0)
-    idx = raw.index.get_level_values(0) if isinstance(raw.index, pd.MultiIndex) else raw.index
-    df = pd.DataFrame({
-        "Open":   raw["Open"].to_numpy().ravel(),
-        "High":   raw["High"].to_numpy().ravel(),
-        "Low":    raw["Low"].to_numpy().ravel(),
-        "Close":  raw["Close"].to_numpy().ravel(),
-        "Volume": raw["Volume"].to_numpy().ravel(),
-    }, index=pd.to_datetime(idx, utc=True))
-    return df.dropna()
+    for ticker in _TICKERS:
+        try:
+            raw = yf.download(ticker, period=period, interval=interval,
+                              progress=False, auto_adjust=True)
+            if raw.empty:
+                continue
+            if isinstance(raw.columns, pd.MultiIndex):
+                raw.columns = raw.columns.get_level_values(0)
+            idx = raw.index.get_level_values(0) if isinstance(raw.index, pd.MultiIndex) else raw.index
+            df = pd.DataFrame({
+                "Open":   raw["Open"].to_numpy().ravel(),
+                "High":   raw["High"].to_numpy().ravel(),
+                "Low":    raw["Low"].to_numpy().ravel(),
+                "Close":  raw["Close"].to_numpy().ravel(),
+                "Volume": raw["Volume"].to_numpy().ravel(),
+            }, index=pd.to_datetime(idx, utc=True))
+            df = df.dropna()
+            if not df.empty:
+                return df
+        except Exception:
+            continue
+    return pd.DataFrame()
 
 
 def load_mtf() -> dict[str, pd.DataFrame]:
@@ -397,6 +411,335 @@ def near_key_level(price: float, levels: list[float], atr: float) -> bool:
     return any(abs(price - lvl) <= threshold for lvl in levels)
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# SKILL 1 : SESSION VWAP — biais institutionnel intraday
+# ══════════════════════════════════════════════════════════════════════════════
+
+def session_vwap(df_m15: pd.DataFrame) -> dict:
+    """
+    VWAP de la session courante (réinitialisé à l'ouverture NY 13:30 UTC).
+    - Prix > VWAP → biais acheteur institutionnel → confluence LONG
+    - Prix < VWAP → biais vendeur institutionnel → confluence SHORT
+    - Écart > 1 ATR → extension potentielle (risque de mean-reversion)
+    """
+    if df_m15 is None or len(df_m15) < 4:
+        return {"vwap": None, "bias": "NEUTRE", "dist_atr": 0.0, "overextended": False}
+
+    now_utc = datetime.now(timezone.utc)
+    session_start_h = 13  # NY open 13:30 UTC
+    session_start   = now_utc.replace(hour=session_start_h, minute=30, second=0, microsecond=0)
+    if now_utc < session_start:
+        # Avant NY — utiliser l'ouverture London 07:00
+        session_start = now_utc.replace(hour=7, minute=0, second=0, microsecond=0)
+
+    # Filtrer les bougies de la session courante
+    sess = df_m15[df_m15.index >= session_start] if hasattr(df_m15.index, 'tz') else df_m15.iloc[-32:]
+    if len(sess) < 2:
+        sess = df_m15.iloc[-32:]
+
+    tp   = (sess["High"] + sess["Low"] + sess["Close"]) / 3   # Typical price
+    vol  = sess["Volume"].replace(0, 1)                         # Évite division par 0
+    vwap = float((tp * vol).cumsum().iloc[-1] / vol.cumsum().iloc[-1])
+
+    price   = float(sess["Close"].iloc[-1])
+    atr_val = float(_atr(df_m15).iloc[-1])
+    dist    = price - vwap
+    dist_atr = dist / max(atr_val, 1.0)
+
+    bias = "LONG" if price > vwap else ("SHORT" if price < vwap else "NEUTRE")
+    overextended = abs(dist_atr) > 1.2   # > 1.2× ATR du VWAP = extension potentielle
+
+    return {
+        "vwap":         round(vwap, 2),
+        "price":        round(price, 2),
+        "dist":         round(dist, 2),
+        "dist_atr":     round(dist_atr, 2),
+        "bias":         bias,
+        "overextended": overextended,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SKILL 2 : BOS / CHoCH — Break of Structure / Change of Character (ICT)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def detect_bos_choch(df_h1: pd.DataFrame, lookback: int = 20) -> dict:
+    """
+    Break of Structure (BOS) : confirmation de continuation de tendance.
+      - BULLISH BOS : nouveau Higher High (cassure du dernier swing high)
+      - BEARISH BOS : nouveau Lower Low (cassure du dernier swing low)
+
+    Change of Character (CHoCH) : premier signal d'inversion.
+      - BULLISH CHoCH : cassure du dernier Lower High en downtrend
+      - BEARISH CHoCH : cassure du dernier Higher Low en uptrend
+
+    Retourne: bos_type, choch_type, dernier swing high/low, niveau cassé.
+    """
+    if df_h1 is None or len(df_h1) < lookback + 5:
+        return {"bos": "NONE", "choch": "NONE", "swing_high": None, "swing_low": None}
+
+    hi = df_h1["High"]
+    lo = df_h1["Low"]
+    cl = df_h1["Close"]
+
+    # Identifier les swing highs et lows (local max/min sur 3 barres)
+    swing_highs, swing_lows = [], []
+    for i in range(2, len(df_h1) - 1):
+        if hi.iloc[i] > hi.iloc[i-1] and hi.iloc[i] > hi.iloc[i+1]:
+            swing_highs.append((i, float(hi.iloc[i])))
+        if lo.iloc[i] < lo.iloc[i-1] and lo.iloc[i] < lo.iloc[i+1]:
+            swing_lows.append((i, float(lo.iloc[i])))
+
+    if len(swing_highs) < 2 or len(swing_lows) < 2:
+        return {"bos": "NONE", "choch": "NONE", "swing_high": None, "swing_low": None}
+
+    last_sh = swing_highs[-1][1]   # Dernier swing high
+    prev_sh = swing_highs[-2][1]   # Avant-dernier swing high
+    last_sl = swing_lows[-1][1]    # Dernier swing low
+    prev_sl = swing_lows[-2][1]    # Avant-dernier swing low
+    price   = float(cl.iloc[-2])
+
+    bos   = "NONE"
+    choch = "NONE"
+
+    # BOS haussier : prix casse le dernier swing high (continuation up)
+    if price > last_sh and last_sh > prev_sh:
+        bos = "BULLISH"
+
+    # BOS baissier : prix casse le dernier swing low (continuation down)
+    elif price < last_sl and last_sl < prev_sl:
+        bos = "BEARISH"
+
+    # CHoCH haussier : downtrend (LH/LL) mais price casse le dernier LH
+    elif last_sh < prev_sh and price > last_sh:
+        choch = "BULLISH"
+
+    # CHoCH baissier : uptrend (HH/HL) mais price casse le dernier HL
+    elif last_sl > prev_sl and price < last_sl:
+        choch = "BEARISH"
+
+    return {
+        "bos":        bos,
+        "choch":      choch,
+        "swing_high": round(last_sh, 2),
+        "swing_low":  round(last_sl, 2),
+        "prev_sh":    round(prev_sh, 2),
+        "prev_sl":    round(prev_sl, 2),
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SKILL 3 : LIQUIDITY SWEEP — détection de stop-hunts institutionnels
+# ══════════════════════════════════════════════════════════════════════════════
+
+def detect_liquidity_sweep(df_h1: pd.DataFrame, atr: float) -> dict:
+    """
+    Liquidity Sweep (stop-hunt) : cassure temporaire d'un niveau clé
+    suivie d'un retour rapide dans le range.
+
+    Bullish sweep : pique sous un swing low récent puis remonte aussitôt
+    → les institutions ont absorbé les ventes des retail longs stoppés.
+    → signal d'achat haute probabilité.
+
+    Bearish sweep : pique au-dessus d'un swing high récent puis descend
+    → institutions ont absorbé les achats des retail shorts stoppés.
+    → signal de vente haute probabilité.
+    """
+    if df_h1 is None or len(df_h1) < 10:
+        return {"sweep": "NONE", "swept_level": None, "confirmation": False}
+
+    hi = df_h1["High"]
+    lo = df_h1["Low"]
+    cl = df_h1["Close"]
+    op = df_h1["Open"]
+
+    # Swing highs/lows des 10 dernières bougies (excluant les 2 dernières)
+    window = df_h1.iloc[-12:-2]
+    ref_high = float(window["High"].max())
+    ref_low  = float(window["Low"].min())
+
+    last_hi = float(hi.iloc[-2])
+    last_lo = float(lo.iloc[-2])
+    last_cl = float(cl.iloc[-2])
+    last_op = float(op.iloc[-2])
+
+    threshold = atr * 0.25   # Pénétration minimale pour valider le sweep
+
+    # Bullish sweep : bougie qui perce sous ref_low puis clôture AU-DESSUS
+    bullish_sweep = (
+        last_lo < ref_low - threshold   # Pique sous le niveau
+        and last_cl > ref_low            # Clôture au-dessus (rejet)
+        and last_cl > last_op            # Bougie haussière (clôture > ouverture)
+    )
+
+    # Bearish sweep : bougie qui perce au-dessus ref_high puis clôture EN-DESSOUS
+    bearish_sweep = (
+        last_hi > ref_high + threshold
+        and last_cl < ref_high
+        and last_cl < last_op
+    )
+
+    if bullish_sweep:
+        return {"sweep": "BULLISH", "swept_level": round(ref_low, 2), "confirmation": True}
+    if bearish_sweep:
+        return {"sweep": "BEARISH", "swept_level": round(ref_high, 2), "confirmation": True}
+
+    return {"sweep": "NONE", "swept_level": None, "confirmation": False}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SKILL 4 : DISPLACEMENT CANDLES — flow institutionnel impulsif
+# ══════════════════════════════════════════════════════════════════════════════
+
+def detect_displacement(df_h1: pd.DataFrame, atr: float) -> dict:
+    """
+    Displacement : bougie avec corps ≥ 1.5× ATR moyen ET clôture aux 75%+ de range.
+    Indique un flux institutionnel fort — confirme la direction du prochain mouvement.
+
+    Bullish displacement : grande bougie haussière récente → bias LONG
+    Bearish displacement : grande bougie baissière récente → bias SHORT
+    """
+    if df_h1 is None or len(df_h1) < 5 or atr <= 0:
+        return {"displacement": "NONE", "strength": 0.0}
+
+    # Analyser les 3 dernières bougies fermées
+    recent = df_h1.iloc[-5:-1]
+    avg_range = float((recent["High"] - recent["Low"]).mean())
+    threshold = max(atr * 1.3, avg_range * 1.5)
+
+    best_disp = "NONE"
+    best_strength = 0.0
+
+    for _, row in recent.iloc[-3:].iterrows():
+        body   = abs(row["Close"] - row["Open"])
+        rng    = row["High"] - row["Low"]
+        if rng < 0.001: continue
+        close_pct = (row["Close"] - row["Low"]) / rng   # Position clôture dans le range
+
+        if body >= threshold and close_pct >= 0.75:
+            # Bullish displacement
+            strength = body / atr
+            if strength > best_strength:
+                best_disp = "BULLISH"
+                best_strength = strength
+
+        elif body >= threshold and close_pct <= 0.25:
+            # Bearish displacement
+            strength = body / atr
+            if strength > best_strength:
+                best_disp = "BEARISH"
+                best_strength = strength
+
+    return {
+        "displacement": best_disp,
+        "strength":     round(best_strength, 2),
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SKILL 5 : VOLATILITY REGIME — filtre ATR percentile
+# ══════════════════════════════════════════════════════════════════════════════
+
+def volatility_regime(df_h1: pd.DataFrame) -> dict:
+    """
+    Classe le régime de volatilité actuel par rapport aux 20 derniers jours.
+    - LOW  (< 25e percentile) : range mort, signaux peu fiables
+    - NORMAL (25-75e) : conditions idéales pour trader
+    - HIGH (> 75e percentile) : volatilité élevée, SL plus larges requis
+    - EXTREME (> 90e) : éviter les nouveaux trades
+
+    Impact :
+    - LOW : réduction du volume de 50% (signaux peu fiables)
+    - NORMAL : volume normal
+    - HIGH : réduction du volume de 25%
+    - EXTREME : blocage total des nouvelles entrées
+    """
+    if df_h1 is None or len(df_h1) < 30:
+        return {"regime": "NORMAL", "atr_pct": 50.0, "vol_factor": 1.0}
+
+    atr_series = _atr(df_h1).dropna()
+    if len(atr_series) < 10:
+        return {"regime": "NORMAL", "atr_pct": 50.0, "vol_factor": 1.0}
+
+    current_atr = float(atr_series.iloc[-1])
+    hist_atrs   = atr_series.iloc[-480:]   # ~20 jours de bougies H1 (20×24)
+
+    pct = float((hist_atrs < current_atr).mean() * 100)
+
+    if pct >= 90:
+        regime, factor = "EXTREME", 0.0    # Bloquer
+    elif pct >= 75:
+        regime, factor = "HIGH",    0.75   # Réduire volume
+    elif pct >= 25:
+        regime, factor = "NORMAL",  1.0    # Conditions idéales
+    else:
+        regime, factor = "LOW",     0.5    # Réduire volume — range mort
+
+    return {
+        "regime":     regime,
+        "atr_pct":    round(pct, 1),
+        "atr_val":    round(current_atr, 1),
+        "vol_factor": factor,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SKILL 6 : EQUAL HIGHS / LOWS — pools de liquidité
+# ══════════════════════════════════════════════════════════════════════════════
+
+def detect_equal_highs_lows(df_h1: pd.DataFrame, atr: float, lookback: int = 30) -> dict:
+    """
+    Equal Highs (EQH) : 2+ swing highs au même niveau (±0.1% ATR).
+    Equal Lows  (EQL) : 2+ swing lows au même niveau.
+
+    Ces niveaux concentrent des stops retail → cibles institutionnelles.
+    - Prix proche d'un EQH → SHORT potentiel (sweep de liquidité imminent)
+    - Prix proche d'un EQL → LONG potentiel (support liquide fort)
+    """
+    if df_h1 is None or len(df_h1) < lookback or atr <= 0:
+        return {"eqh": [], "eql": [], "near_eqh": False, "near_eql": False}
+
+    hi = df_h1["High"].iloc[-lookback:]
+    lo = df_h1["Low"].iloc[-lookback:]
+    cl = float(df_h1["Close"].iloc[-2])
+
+    tolerance = atr * 0.12   # Niveaux à ±0.12 ATR = "égaux"
+
+    # Swing highs
+    s_highs = [float(hi.iloc[i]) for i in range(1, len(hi)-1)
+               if hi.iloc[i] > hi.iloc[i-1] and hi.iloc[i] > hi.iloc[i+1]]
+    # Swing lows
+    s_lows  = [float(lo.iloc[i]) for i in range(1, len(lo)-1)
+               if lo.iloc[i] < lo.iloc[i-1] and lo.iloc[i] < lo.iloc[i+1]]
+
+    def cluster(levels: list[float]) -> list[float]:
+        """Regroupe les niveaux proches en un seul niveau moyen."""
+        clusters = []
+        for lvl in sorted(levels):
+            merged = False
+            for i, c in enumerate(clusters):
+                if abs(lvl - c) <= tolerance:
+                    clusters[i] = (c + lvl) / 2
+                    merged = True
+                    break
+            if not merged:
+                clusters.append(lvl)
+        return [c for c in clusters if sum(1 for l in levels if abs(l - c) <= tolerance) >= 2]
+
+    eqh = [round(c, 2) for c in cluster(s_highs)]
+    eql = [round(c, 2) for c in cluster(s_lows)]
+
+    near_eqh = any(abs(cl - h) <= atr * 0.3 for h in eqh)
+    near_eql  = any(abs(cl - l) <= atr * 0.3 for l in eql)
+
+    return {
+        "eqh":      eqh[-3:],   # 3 niveaux les plus récents
+        "eql":      eql[-3:],
+        "near_eqh": near_eqh,
+        "near_eql": near_eql,
+    }
+
+
 # ── Kill Zone ─────────────────────────────────────────────────────────────────
 
 def current_kill_zone() -> str:
@@ -415,6 +758,68 @@ def current_kill_zone() -> str:
             return name
 
     return ""
+
+
+# ── Analyse H4 — Structure de marché ─────────────────────────────────────────
+
+def analyze_h4(df: pd.DataFrame) -> dict:
+    """
+    Structure de marché H4 via Ichimoku + EMA 20/50 + MACD.
+    Retourne: bias (HAUSSIER|BAISSIER|NEUTRE), swing high/low, alignement.
+    """
+    if df is None or len(df) < 55:
+        return {"bias": "NEUTRE", "aligned": False, "signal": "SKIP", "macd_h": 0.0, "adx": 0.0}
+
+    cl   = df["Close"]
+    hi   = df["High"]
+    lo   = df["Low"]
+    idx  = -2  # dernière bougie fermée
+
+    e20  = float(_ema(cl, 20).iloc[idx])
+    e50  = float(_ema(cl, 50).iloc[idx])
+    last = float(cl.iloc[idx])
+    macd_h = float(_macd_hist(cl).iloc[idx])
+    adx_v  = float(_adx(df).iloc[idx])
+
+    # Ichimoku H4
+    ichi = _ichimoku(df)
+    t    = float(ichi["tenkan"].iloc[idx])
+    k    = float(ichi["kijun"].iloc[idx])
+    sa_raw = ((ichi["tenkan"] + ichi["kijun"]) / 2).iloc[idx]
+    sb_raw = ((hi.rolling(config.SENKOU_B_PERIOD).max() + lo.rolling(config.SENKOU_B_PERIOD).min()) / 2).iloc[idx]
+    sa   = float(sa_raw)
+    sb   = float(sb_raw)
+    kumo_top = max(sa, sb)
+    kumo_bot = min(sa, sb)
+    in_kumo  = kumo_bot <= last <= kumo_top
+
+    # Structure swing (Higher High / Higher Low)
+    highs = hi.rolling(5).max().dropna()
+    lows  = lo.rolling(5).min().dropna()
+    hh = len(highs) >= 3 and highs.iloc[-1] > highs.iloc[-3]
+    hl = len(lows)  >= 3 and lows.iloc[-1]  > lows.iloc[-3]
+    lh = len(highs) >= 3 and highs.iloc[-1] < highs.iloc[-3]
+    ll = len(lows)  >= 3 and lows.iloc[-1]  < lows.iloc[-3]
+
+    bullish = not in_kumo and last > kumo_top and last > e20 and t > k and macd_h > 0 and (hh and hl)
+    bearish = not in_kumo and last < kumo_bot and last < e20 and t < k and macd_h < 0 and (lh and ll)
+
+    bias = "HAUSSIER" if bullish else ("BAISSIER" if bearish else "NEUTRE")
+
+    return {
+        "bias":     bias,
+        "signal":   "LONG" if bullish else ("SHORT" if bearish else "SKIP"),
+        "aligned":  bullish or bearish,
+        "last":     round(last, 2),
+        "e20":      round(e20, 2),
+        "e50":      round(e50, 2),
+        "kumo_top": round(kumo_top, 2),
+        "kumo_bot": round(kumo_bot, 2),
+        "macd_h":   round(macd_h, 2),
+        "adx":      round(adx_v, 1),
+        "hh_hl":    hh and hl,
+        "lh_ll":    lh and ll,
+    }
 
 
 # ── Analyse H1 — Signal de base ───────────────────────────────────────────────
@@ -536,6 +941,13 @@ def score_setup(
     key_level: bool,
     kill_zone: str,
     h4_aligned: bool,
+    # Nouveaux skills institutionnels
+    vwap: dict | None = None,
+    bos_choch: dict | None = None,
+    sweep: dict | None = None,
+    displacement: dict | None = None,
+    vol_regime: dict | None = None,
+    eq_hl: dict | None = None,
 ) -> tuple[int, list[str], list[str]]:
     """
     Attribue un score de confluence. Chaque confluence = +1 point.
@@ -607,7 +1019,50 @@ def score_setup(
     if d1["trend_strength"] == "FORT":
         confluences.append("Tendance D1 forte")
 
-    # 12. Chikou Span (confirmation institutionnelle Ichimoku)
+    # ── Skills institutionnels ────────────────────────────────────────────────
+
+    # 12. Session VWAP — biais intraday institutionnel
+    if vwap and vwap.get("vwap"):
+        if direction == "LONG" and vwap["bias"] == "LONG":
+            confluences.append(f"VWAP haussier (prix={vwap['price']:.0f} > VWAP={vwap['vwap']:.0f})")
+        elif direction == "SHORT" and vwap["bias"] == "SHORT":
+            confluences.append(f"VWAP baissier (prix={vwap['price']:.0f} < VWAP={vwap['vwap']:.0f})")
+        elif vwap.get("overextended"):
+            warnings.append(f"Extension VWAP excessive ({vwap['dist_atr']:+.1f}×ATR) — mean-reversion risque")
+
+    # 13. BOS / CHoCH (ICT structure)
+    if bos_choch:
+        if direction == "LONG" and bos_choch["bos"] == "BULLISH":
+            confluences.append(f"BOS Haussier confirmé (swing_high={bos_choch['swing_high']:.0f})")
+        elif direction == "LONG" and bos_choch["choch"] == "BULLISH":
+            confluences.append(f"CHoCH Haussier — inversion confirmée")
+        elif direction == "SHORT" and bos_choch["bos"] == "BEARISH":
+            confluences.append(f"BOS Baissier confirmé (swing_low={bos_choch['swing_low']:.0f})")
+        elif direction == "SHORT" and bos_choch["choch"] == "BEARISH":
+            confluences.append(f"CHoCH Baissier — inversion confirmée")
+
+    # 14. Liquidity Sweep — stop-hunt institutionnel
+    if sweep and sweep["confirmation"]:
+        if direction == "LONG" and sweep["sweep"] == "BULLISH":
+            confluences.append(f"Liquidity Sweep Haussier @ {sweep['swept_level']:.0f} — stop-hunt absorbé")
+        elif direction == "SHORT" and sweep["sweep"] == "BEARISH":
+            confluences.append(f"Liquidity Sweep Baissier @ {sweep['swept_level']:.0f} — stop-hunt absorbé")
+
+    # 15. Displacement candle — flow institutionnel confirmé
+    if displacement and displacement["displacement"] != "NONE":
+        if direction == "LONG" and displacement["displacement"] == "BULLISH":
+            confluences.append(f"Displacement haussier (force={displacement['strength']:.1f}×ATR)")
+        elif direction == "SHORT" and displacement["displacement"] == "BEARISH":
+            confluences.append(f"Displacement baissier (force={displacement['strength']:.1f}×ATR)")
+
+    # 16. Equal Highs / Lows — pool de liquidité
+    if eq_hl:
+        if direction == "LONG" and eq_hl["near_eql"]:
+            confluences.append(f"Equal Lows @ support ({eq_hl['eql']}) — liquidité institutionnelle")
+        elif direction == "SHORT" and eq_hl["near_eqh"]:
+            confluences.append(f"Equal Highs @ résistance ({eq_hl['eqh']}) — liquidité institutionnelle")
+
+    # 18. Chikou Span (confirmation institutionnelle Ichimoku)
     if direction == "LONG" and h1.get("chikou_bullish"):
         confluences.append(f"Chikou Span haussier (> prix H-26)")
     elif direction == "SHORT" and h1.get("chikou_bearish"):
@@ -615,13 +1070,13 @@ def score_setup(
     else:
         warnings.append("Chikou Span non confirme — signal affaibli")
 
-    # 13. Cloud twist — direction du nuage futur (SA vs SB)
+    # 19. Cloud twist — direction du nuage futur (SA vs SB)
     if direction == "LONG" and h1.get("cloud_bullish_twist"):
         confluences.append("Cloud twist haussier (SA > SB)")
     elif direction == "SHORT" and h1.get("cloud_bearish_twist"):
         confluences.append("Cloud twist baissier (SA < SB)")
 
-    # 14. MACD divergence D1 — pénalité si divergence contre la direction
+    # 20. MACD divergence D1 — pénalité si divergence contre la direction
     d1_divergence = d1.get("macd_divergence", "NONE")
     if direction == "LONG" and d1_divergence == "BEARISH":
         warnings.append("MACD divergence baissiere D1 — conviction -2")
@@ -764,15 +1219,10 @@ def generate_pro_signal(mtf: dict[str, pd.DataFrame]) -> ProSignal:
         sig.direction = "SKIP"
         return sig
 
-    # ── H4 alignement ─────────────────────────────────────────────────────────
-    h4_aligned = False
-    if not df_h4.empty and len(df_h4) >= 20:
-        h4_cl   = df_h4["Close"]
-        h4_e20  = float(_ema(h4_cl, 20).iloc[-1])
-        h4_last = float(h4_cl.iloc[-1])
-        h4_aligned = (direction == "SHORT" and h4_last < h4_e20) or \
-                     (direction == "LONG"  and h4_last > h4_e20)
-        sig.h4_structure = "BAISSIER" if h4_last < h4_e20 else "HAUSSIER"
+    # ── H4 analyse complète ───────────────────────────────────────────────────
+    h4_data    = analyze_h4(df_h4) if not df_h4.empty else {"bias": "NEUTRE", "signal": "SKIP", "aligned": False}
+    h4_aligned = (h4_data["signal"] == direction)
+    sig.h4_structure = h4_data.get("bias", "NEUTRE")
 
     # ── Order Blocks ──────────────────────────────────────────────────────────
     ob_h1 = detect_order_blocks(df_h1)
@@ -796,9 +1246,37 @@ def generate_pro_signal(mtf: dict[str, pd.DataFrame]) -> ProSignal:
     kz = current_kill_zone()
     sig.kill_zone = kz
 
-    # ── Scoring ───────────────────────────────────────────────────────────────
+    # ── Skill 1 : Session VWAP ────────────────────────────────────────────────
+    vwap_data = session_vwap(df_m15) if not df_m15.empty else None
+
+    # ── Skill 2 : BOS / CHoCH ─────────────────────────────────────────────────
+    bos_data = detect_bos_choch(df_h1)
+
+    # ── Skill 3 : Liquidity Sweep ─────────────────────────────────────────────
+    sweep_data = detect_liquidity_sweep(df_h1, h1["atr"])
+
+    # ── Skill 4 : Displacement ────────────────────────────────────────────────
+    disp_data = detect_displacement(df_h1, h1["atr"])
+
+    # ── Skill 5 : Volatility Regime ───────────────────────────────────────────
+    vol_data = volatility_regime(df_h1)
+    sig.warnings.append(f"Volatilité: {vol_data['regime']} ({vol_data['atr_pct']:.0f}e pct)")
+
+    # Bloquer si EXTREME
+    if vol_data["regime"] == "EXTREME":
+        log.info(f"  [VOL REGIME] Volatilité EXTREME ({vol_data['atr_pct']:.0f}e pct) — pas de trade")
+        sig.direction = "SKIP"
+        sig.warnings.append("Volatilite EXTREME — trading bloque")
+        return sig
+
+    # ── Skill 6 : Equal Highs / Lows ─────────────────────────────────────────
+    eq_hl_data = detect_equal_highs_lows(df_h1, h1["atr"])
+
+    # ── Scoring (avec tous les nouveaux skills) ────────────────────────────────
     score, confluences, warnings = score_setup(
-        direction, d1, h1, ob_hit, fvg_hit, kl_hit, kz, h4_aligned
+        direction, d1, h1, ob_hit, fvg_hit, kl_hit, kz, h4_aligned,
+        vwap=vwap_data, bos_choch=bos_data, sweep=sweep_data,
+        displacement=disp_data, vol_regime=vol_data, eq_hl=eq_hl_data,
     )
     sig.score       = score
     sig.confluences = confluences
@@ -818,6 +1296,25 @@ def generate_pro_signal(mtf: dict[str, pd.DataFrame]) -> ProSignal:
     if sig.grade == "B":
         sig.direction = "SKIP"
         return sig
+
+    # ── Filtre : momentum des 3 dernières bougies M15 ─────────────────────────
+    # Pour A/A+ : exiger que les 2 des 3 dernières bougies M15 fermées
+    # soient dans la direction du signal (évite les entrées contre le momentum immédiat)
+    if df_m15 is not None and not df_m15.empty and len(df_m15) >= 5:
+        m15_cl     = df_m15["Close"].iloc[-4:-1]   # 3 dernières bougies fermées
+        m15_op     = df_m15["Open"].iloc[-4:-1]
+        bull_count = int((m15_cl > m15_op).sum())
+        bear_count = 3 - bull_count
+        if direction == "LONG" and bull_count < 2:
+            sig.direction = "SKIP"
+            sig.warnings.append(f"Momentum M15 insuffisant ({bull_count}/3 bougies haussières) — LONG bloqué")
+            log.info(f"  [FILTRE] LONG bloqué — momentum M15 faible ({bull_count}/3 bougies vertes)")
+            return sig
+        elif direction == "SHORT" and bear_count < 2:
+            sig.direction = "SKIP"
+            sig.warnings.append(f"Momentum M15 insuffisant ({bear_count}/3 bougies baissières) — SHORT bloqué")
+            log.info(f"  [FILTRE] SHORT bloqué — momentum M15 faible ({bear_count}/3 bougies rouges)")
+            return sig
 
     # ── Niveaux de prix ───────────────────────────────────────────────────────
     atr   = h1["atr"]
@@ -849,8 +1346,52 @@ def generate_pro_signal(mtf: dict[str, pd.DataFrame]) -> ProSignal:
         sig.warnings.append(f"R:R insuffisant ({rr_val:.2f} < {config.MIN_RR})")
         return sig
 
-    sig.direction = direction
-    sig.rr        = f"1:{round(rr_val, 1)}"
+    # ── Filtre : proximité prix actuel vs entrée calculée ─────────────────────
+    # Si le prix M15 actuel est à plus de MAX_ENTRY_SLIPPAGE_ATR × ATR de l'entrée
+    # calculée sur H1, le trade est bloqué (évite les entrées avec trop de slippage)
+    if df_m15 is not None and not df_m15.empty and len(df_m15) >= 2:
+        price_now   = float(df_m15["Close"].iloc[-2])   # dernière bougie M15 fermée
+        entry_dist  = abs(price_now - sig.entry)
+        max_slip    = atr * MAX_ENTRY_SLIPPAGE_ATR
+        if entry_dist > max_slip:
+            # Ajuster l'entrée au prix actuel si on peut maintenir le R:R
+            if direction == "LONG":
+                new_entry = price_now
+                new_sl    = round(new_entry - atr * config.ATR_SL_MULT,  2)
+                new_tp2   = round(new_entry + atr * config.ATR_TP2_MULT, 2)
+            else:
+                new_entry = price_now
+                new_sl    = round(new_entry + atr * config.ATR_SL_MULT,  2)
+                new_tp2   = round(new_entry - atr * config.ATR_TP2_MULT, 2)
+            new_risk   = abs(new_sl - new_entry)
+            new_reward = abs(new_tp2 - new_entry)
+            new_rr     = new_reward / max(new_risk, 0.01)
+            if new_rr >= config.MIN_RR:
+                log.info(
+                    f"  [SLIPPAGE] Entrée ajustée H1:{sig.entry:.0f} → M15:{new_entry:.0f} "
+                    f"(dist={entry_dist:.0f}pts > max={max_slip:.0f}pts) | R:R={new_rr:.1f}"
+                )
+                sig.entry = round(new_entry, 2)
+                sig.sl    = new_sl
+                sig.tp1   = round(new_entry + atr * config.ATR_TP1_MULT * (1 if direction == "LONG" else -1), 2)
+                sig.tp2   = new_tp2
+                rr_val    = new_rr
+            else:
+                sig.direction = "SKIP"
+                sig.warnings.append(
+                    f"Slippage trop grand ({entry_dist:.0f}pts > {max_slip:.0f}pts) — R:R dégradé ({new_rr:.1f})"
+                )
+                log.info(
+                    f"  [SLIPPAGE] Trade bloqué — écart {entry_dist:.0f}pts trop grand "
+                    f"(max={max_slip:.0f}pts), R:R dégradé à {new_rr:.1f}"
+                )
+                return sig
+
+    sig.direction   = direction
+    sig.rr          = f"1:{round(rr_val, 1)}"
+    # Facteur de volatilité intégré dans le grade (info pour sizing dynamique)
+    if vol_data["vol_factor"] < 1.0:
+        sig.warnings.append(f"Volume réduit {vol_data['vol_factor']:.0%} (régime {vol_data['regime']})")
     return sig
 
 

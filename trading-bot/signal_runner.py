@@ -25,6 +25,7 @@ from strategy_pro import load_mtf, generate_pro_signal, print_pro_signal
 from market_intelligence import MarketIntelligenceEngine
 from news_surveillance import NewsSurveillanceEngine
 from jesse_adapter import get_market_regime, get_var_estimate, validate_sl_with_monte_carlo, JESSE_MCP_AVAILABLE
+from trading_library import full_library_assessment, SteenbargerPerformanceTracker
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -98,6 +99,28 @@ def run_scan():
 
     if sig.direction == "SKIP":
         return
+
+    # ── Filtre Trading Library (5 livres) ────────────────────────────────────
+    try:
+        signal_data = {
+            "direction": sig.direction,
+            "d1_bias": sig.d1_bias if hasattr(sig, 'd1_bias') else "NEUTRE",
+            "h1_signal": sig.direction,
+            "confluences_count": len(sig.confluences) if hasattr(sig, 'confluences') else 0,
+            "rsi": getattr(sig, 'rsi', 50),
+            "atr": sig.atr,
+            "d1_macd_hist": 0,
+        }
+        library_result = full_library_assessment(state, signal_data)
+        if not library_result["can_trade"]:
+            for reason in library_result["reasons"]:
+                log.warning(f"  [LIBRARY] {reason}")
+            log.info(f"  [LIBRARY] {library_result['quote']}")
+            if library_result["steenbarger"]["status"] == "CIRCUIT_BREAKER":
+                log.warning("  [LIBRARY] CIRCUIT BREAKER ACTIF — signal ignoré")
+                return
+    except Exception as e:
+        log.debug(f"trading_library filter: {e}")
 
     # Anti-reentry — actif uniquement après un SL (pas après un TP profitable)
     last_entry  = state.get("last_entry_price")

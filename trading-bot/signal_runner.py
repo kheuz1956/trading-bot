@@ -24,6 +24,7 @@ import config
 from strategy_pro import load_mtf, generate_pro_signal, print_pro_signal
 from market_intelligence import MarketIntelligenceEngine
 from news_surveillance import NewsSurveillanceEngine
+from jesse_adapter import get_market_regime, get_var_estimate, validate_sl_with_monte_carlo, JESSE_MCP_AVAILABLE
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -77,9 +78,10 @@ def run_scan():
 
     # Surveillance marché
     try:
+        import asyncio
         mi = MarketIntelligenceEngine()
-        mi_result = mi.analyze()
-        if mi_result.risk_score <= -0.3:
+        mi_result = asyncio.run(mi.analyze())
+        if mi_result and mi_result.risk_score <= -0.3:
             log.info(f"  [SURVEILLANCE] RISK_OFF (score={mi_result.risk_score:.2f}) — prudence")
     except Exception:
         pass
@@ -97,16 +99,36 @@ def run_scan():
     if sig.direction == "SKIP":
         return
 
-    # Anti-reentry
-    last_entry = state.get("last_entry_price")
-    last_side  = state.get("last_trade_side")
-    if last_side == sig.direction and last_entry:
+    # Anti-reentry — actif uniquement après un SL (pas après un TP profitable)
+    last_entry  = state.get("last_entry_price")
+    last_side   = state.get("last_trade_side")
+    last_reason = state.get("last_close_reason", "tp")  # "tp" / "sl" / "manual"
+    if last_side == sig.direction and last_entry and last_reason == "sl":
         if sig.direction == "LONG"  and sig.entry > last_entry:
-            log.warning(f"  [ANTI-REENTRY] LONG bloqué: {sig.entry:.0f} > {last_entry:.0f}")
+            log.warning(f"  [ANTI-REENTRY] LONG bloqué après SL: {sig.entry:.0f} > {last_entry:.0f}")
             return
         if sig.direction == "SHORT" and sig.entry < last_entry:
-            log.warning(f"  [ANTI-REENTRY] SHORT bloqué: {sig.entry:.0f} < {last_entry:.0f}")
+            log.warning(f"  [ANTI-REENTRY] SHORT bloqué après SL: {sig.entry:.0f} < {last_entry:.0f}")
             return
+
+    # ── Enrichissement Jesse-MCP ─────────────────────────────────────────────
+    if JESSE_MCP_AVAILABLE:
+        try:
+            regime = get_market_regime("US100", "1h")
+            if regime.get("available"):
+                log.info(f"  [JESSE] Régime: {regime['regime']} (conf={regime['confidence']:.0%})")
+
+            var = get_var_estimate("US100", config.VOLUME, sig.entry)
+            if var.get("available") and var.get("var_usd"):
+                log.info(f"  [JESSE] VaR 95%: {var['var_usd']:.2f} USD")
+
+            mc = validate_sl_with_monte_carlo("US100", sig.entry, sig.sl, sig.tp2)
+            if mc.get("available") and mc.get("tp_probability") is not None:
+                log.info(f"  [JESSE] Monte Carlo TP prob: {mc['tp_probability']:.0%}")
+                if mc["tp_probability"] < 0.40:
+                    log.warning(f"  [JESSE] ⚠ Probabilité TP faible ({mc['tp_probability']:.0%}) — prudence")
+        except Exception as e:
+            log.debug(f"jesse-mcp enrichissement: {e}")
 
     # Alerte trade — exécution manuelle requise
     log.info("=" * 56)

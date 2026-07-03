@@ -1,18 +1,1 @@
-{
-  "entry_price": null,
-  "trade_side": null,
-  "tp1_done": false,
-  "last_entry_price": 30598.0,
-  "last_trade_side": "LONG",
-  "consecutive_losses": 2,
-  "trail_stop": null,
-  "current_volume": 0.05,
-  "sl": null,
-  "tp": null,
-  "entry_time": null,
-  "grade": null,
-  "vol_regime": "NORMAL",
-  "last_close_price": 30526.0,
-  "last_pnl": -142.0,
-  "last_close_reason": "manual"
-}
+{"entry_price": null, "trade_side": null, "tp1_done": false, "last_entry_price": 30395.0, "last_trade_side": "LONG", "consecutive_losses": 2, "trail_stop": null, "current_volume": 0.029, "order_placed_at": 1782902437.9934125, "entry_time": "2026-07-01T10:40:37.993412+00:00", "daily_trade_count": 0, "trade_date": "2026-07-03", "cooldown_until": 1782906864.8666985, "daily_losses": 2, "sl": null}

@@ -1,0 +1,12 @@
+{
+  "name": "xtb-signal-automator",
+  "version": "1.0.0",
+  "description": "Node.js signal automator — CDP xStation5 + log watcher",
+  "main": "auto_signal.js",
+  "scripts": {
+    "start": "node auto_signal.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

@@ -27,6 +27,7 @@ log = logging.getLogger("xtb_pw")
 # ── Kill Zones UTC (liquidité institutionnelle maximale) ──────────────────────
 KILL_ZONES = {
     "LONDON_OPEN":    (7 * 60,       10 * 60),    # 07:00 – 10:00 UTC (pré-London + ouverture)
+    "LONDON_NY":      (10 * 60,      13 * 60 + 30), # 10:00 – 13:30 UTC (overlap London-NY, forte liquidité)
     "NY_OPEN":        (13 * 60 + 30, 16 * 60),    # 13:30 – 16:00 UTC
     "NY_AFTERNOON":   (16 * 60,      20 * 60),    # 16:00 – 20:00 UTC (session NY active)
     "NY_CLOSE":       (20 * 60,      21 * 60),    # 20:00 – 21:00 UTC (clôture, éviter)
@@ -655,6 +656,156 @@ def detect_liquidity_sweep(df_h1: pd.DataFrame, atr: float) -> dict:
     return {"sweep": "NONE", "swept_level": None, "confirmation": False}
 
 
+def detect_sweep_setup(
+    df_h1: pd.DataFrame, atr: float, direction: str, fvgs: list | None = None
+) -> dict:
+    """
+    Sweep Setup ICT complet : stop-hunt multi-niveau + FVG post-sweep.
+
+    Étapes :
+      1. Identifie les niveaux clés (pivots swing réels sur 20 bougies)
+      2. Cherche un sweep dans les 5 dernières bougies H1 (pas juste la dernière)
+      3. Identifie la FVG créée APRÈS le sweep → zone d'entrée institutionnelle
+      4. Score qualité : HIGH (sweep ≤1 bar + FVG post-sweep),
+                         MEDIUM (sweep ≤3 bars, ou sweep sans FVG),
+                         LOW (sweep >3 bars confirmé)
+
+    Returns:
+        {confirmed, quality, sweep_type, swept_level, age_bars,
+         post_sweep_fvg, fvg_entry_zone, retest_done}
+    """
+    empty = {
+        "confirmed": False, "quality": "NONE", "sweep_type": "NONE",
+        "swept_level": None, "age_bars": None,
+        "post_sweep_fvg": False, "fvg_entry_zone": None, "retest_done": False,
+    }
+    if df_h1 is None or len(df_h1) < 20 or atr <= 0:
+        return empty
+
+    hi  = df_h1["High"].values
+    lo  = df_h1["Low"].values
+    cl  = df_h1["Close"].values
+    op  = df_h1["Open"].values
+    n   = len(hi)
+
+    # ── 1. Niveaux clés : swing pivots sur les 20 dernières bougies ───────────
+    ref_window = slice(n - 22, n - 2)
+    pivot_lows  = []
+    pivot_highs = []
+    for i in range(n - 21, n - 3):
+        if lo[i] < lo[i - 1] and lo[i] < lo[i + 1]:
+            pivot_lows.append(lo[i])
+        if hi[i] > hi[i - 1] and hi[i] > hi[i + 1]:
+            pivot_highs.append(hi[i])
+
+    if not pivot_lows:
+        pivot_lows  = [float(df_h1["Low"].iloc[-22:-2].min())]
+    if not pivot_highs:
+        pivot_highs = [float(df_h1["High"].iloc[-22:-2].max())]
+
+    ssl = min(pivot_lows)    # Sell Side Liquidity (stops longs sous pivot bas)
+    bsl = max(pivot_highs)   # Buy  Side Liquidity (stops shorts sur pivot haut)
+
+    threshold = atr * 0.20
+
+    # ── 2. Sweep dans les 5 dernières bougies ─────────────────────────────────
+    sweep_found  = False
+    sweep_type   = "NONE"
+    swept_level  = None
+    sweep_bar    = None   # indice dans df (0 = plus récent parmi les 5)
+
+    for age in range(1, 6):          # age=1 → avant-dernière bougie
+        idx = n - 1 - age
+        if idx < 0:
+            break
+        bar_lo = lo[idx]
+        bar_hi = hi[idx]
+        bar_cl = cl[idx]
+        bar_op = op[idx]
+
+        bull = (
+            bar_lo < ssl - threshold
+            and bar_cl > ssl
+            and bar_cl > bar_op
+        )
+        bear = (
+            bar_hi > bsl + threshold
+            and bar_cl < bsl
+            and bar_cl < bar_op
+        )
+
+        if bull and (direction == "LONG"):
+            sweep_found = True
+            sweep_type  = "BULLISH"
+            swept_level = round(ssl, 2)
+            sweep_bar   = age
+            break
+        if bear and (direction == "SHORT"):
+            sweep_found = True
+            sweep_type  = "BEARISH"
+            swept_level = round(bsl, 2)
+            sweep_bar   = age
+            break
+
+    if not sweep_found:
+        return empty
+
+    # ── 3. FVG post-sweep ─────────────────────────────────────────────────────
+    post_sweep_fvg  = False
+    fvg_entry_zone  = None
+
+    if fvgs:
+        for fvg in fvgs:
+            fvg_type_ok = (
+                (sweep_type == "BULLISH" and fvg.get("type") == "BULLISH_FVG") or
+                (sweep_type == "BEARISH" and fvg.get("type") == "BEARISH_FVG")
+            )
+            if fvg_type_ok:
+                post_sweep_fvg = True
+                fvg_entry_zone = {"top": fvg["top"], "bottom": fvg["bottom"], "mid": fvg["mid"]}
+                break
+
+    # Fallback : FVG synthétique à partir du swing post-sweep
+    if not post_sweep_fvg and sweep_bar and sweep_bar < n - 2:
+        after_idx = n - sweep_bar   # bougie juste après le sweep
+        if after_idx < n:
+            if sweep_type == "BULLISH":
+                fvg_low  = float(cl[after_idx - 1]) if after_idx > 0 else swept_level
+                fvg_high = fvg_low + atr * 0.4
+                fvg_entry_zone = {"top": round(fvg_high, 2), "bottom": round(fvg_low, 2),
+                                  "mid": round((fvg_high + fvg_low) / 2, 2)}
+            else:
+                fvg_high = float(cl[after_idx - 1]) if after_idx > 0 else swept_level
+                fvg_low  = fvg_high - atr * 0.4
+                fvg_entry_zone = {"top": round(fvg_high, 2), "bottom": round(fvg_low, 2),
+                                  "mid": round((fvg_high + fvg_low) / 2, 2)}
+
+    # ── 4. Retest : prix actuel dans la FVG post-sweep ────────────────────────
+    current_price = float(cl[-1])
+    retest_done   = False
+    if fvg_entry_zone:
+        retest_done = fvg_entry_zone["bottom"] <= current_price <= fvg_entry_zone["top"]
+
+    # ── 5. Qualité ────────────────────────────────────────────────────────────
+    if sweep_bar <= 1 and post_sweep_fvg:
+        quality = "HIGH"
+    elif sweep_bar <= 3 or post_sweep_fvg:
+        quality = "MEDIUM"
+    else:
+        quality = "LOW"
+
+    return {
+        "confirmed":      True,
+        "quality":        quality,
+        "sweep_type":     sweep_type,
+        "swept_level":    swept_level,
+        "age_bars":       sweep_bar,
+        "post_sweep_fvg": post_sweep_fvg,
+        "fvg_entry_zone": fvg_entry_zone,
+        "retest_done":    retest_done,
+    }
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # SKILL 4 : DISPLACEMENT CANDLES — flow institutionnel impulsif
 # ══════════════════════════════════════════════════════════════════════════════
@@ -806,6 +957,87 @@ def detect_equal_highs_lows(df_h1: pd.DataFrame, atr: float, lookback: int = 30)
         "near_eqh": near_eqh,
         "near_eql": near_eql,
     }
+
+
+# ── Divergence RSI / MACD ─────────────────────────────────────────────────────
+
+def detect_divergence(df: pd.DataFrame, direction: str, lookback: int = 5) -> tuple[bool, str]:
+    """
+    Détecte les divergences RSI et MACD (régulières) sur les N dernières bougies.
+    Divergence baissière : prix fait un nouveau high, RSI/MACD fait un lower high → SHORT.
+    Divergence haussière : prix fait un nouveau low, RSI/MACD fait un higher low → LONG.
+    Retourne (detected: bool, description: str)
+    """
+    if df is None or len(df) < lookback + 5:
+        return False, ""
+
+    cl    = df["Close"].iloc[-(lookback + 5):-1]
+    rsi   = _rsi(cl, 14).iloc[-lookback:]
+    mh    = _macd_hist(cl).iloc[-lookback:]
+    price = cl.iloc[-lookback:]
+
+    detected = False
+    desc     = ""
+
+    if direction == "SHORT":
+        # Prix higher high mais RSI/MACD lower high → divergence baissière
+        p_hh = float(price.iloc[-1]) >= float(price.max()) * 0.998
+        r_lh = float(rsi.iloc[-1])   <  float(rsi.max())  * 0.95
+        m_lh = float(mh.iloc[-1])    <  float(mh.max())   * 0.95
+        if p_hh and (r_lh or m_lh):
+            detected = True
+            parts = []
+            if r_lh:
+                parts.append(f"RSI div baissière ({rsi.iloc[-1]:.0f}<{rsi.max():.0f})")
+            if m_lh:
+                parts.append("MACD div baissière")
+            desc = " + ".join(parts)
+    elif direction == "LONG":
+        # Prix lower low mais RSI/MACD higher low → divergence haussière
+        p_ll = float(price.iloc[-1]) <= float(price.min()) * 1.002
+        r_hl = float(rsi.iloc[-1])   >  float(rsi.min())  * 1.05
+        m_hl = float(mh.iloc[-1])    >  float(mh.min())   * 1.05
+        if p_ll and (r_hl or m_hl):
+            detected = True
+            parts = []
+            if r_hl:
+                parts.append(f"RSI div haussière ({rsi.iloc[-1]:.0f}>{rsi.min():.0f})")
+            if m_hl:
+                parts.append("MACD div haussière")
+            desc = " + ".join(parts)
+
+    return detected, desc
+
+
+# ── Volume Profile (Point of Control) ────────────────────────────────────────
+
+def calculate_poc(df: pd.DataFrame, periods: int = 40) -> float | None:
+    """
+    Point of Control (POC) : niveau de prix avec le plus grand volume sur N périodes.
+    Approximation via histogramme de (H+L)/2 pondéré par volume.
+    Niveau clé institutionnel — agit comme aimant de prix.
+    """
+    if df is None or len(df) < periods or "Volume" not in df.columns:
+        return None
+
+    sl = df.iloc[-periods:]
+    vol = sl["Volume"]
+    if vol.sum() < 1:
+        return None
+
+    mid = (sl["High"] + sl["Low"]) / 2
+    price_min = float(sl["Low"].min())
+    price_max = float(sl["High"].max())
+    if price_max <= price_min:
+        return None
+
+    bins = 30
+    bucket_width = (price_max - price_min) / bins
+    buckets = ((mid - price_min) / bucket_width).clip(0, bins - 1).astype(int)
+    vol_by_bucket = vol.groupby(buckets).sum()
+    max_bucket = int(vol_by_bucket.idxmax())
+    poc = price_min + (max_bucket + 0.5) * bucket_width
+    return round(poc, 2)
 
 
 # ── Kill Zone ─────────────────────────────────────────────────────────────────
@@ -998,6 +1230,339 @@ def analyze_h1(df: pd.DataFrame) -> dict:
     }
 
 
+# ── AMD (Accumulation, Manipulation, Distribution) ───────────────────────────
+
+def detect_amd_structure(df_h1: pd.DataFrame) -> dict:
+    """
+    Détecte la structure AMD sur le marché courant.
+
+    A : Asian session 00:00–07:00 UTC → range de consolidation
+    M : London Open  07:00–10:00 UTC → sweep de liquidité (stop-hunt)
+    D : NY Session   13:30–21:00 UTC → distribution directionnelle réelle
+
+    Le sens de la manipulation est l'opposé du move Distribution :
+      - London sweep Asian Low  → Distribution LONG (NY monte)
+      - London sweep Asian High → Distribution SHORT (NY descend)
+    """
+    empty = {
+        "phase": "UNKNOWN", "direction": "NONE",
+        "asian_high": 0.0,  "asian_low": 0.0,
+        "swept_high": False, "swept_low": False,
+        "manipulation_type": "NONE", "confidence": 0,
+    }
+
+    if df_h1.empty or len(df_h1) < 10:
+        return empty
+
+    try:
+        now_utc = pd.Timestamp.now(tz="UTC")
+        today   = now_utc.date()
+
+        # Range asiatique (00:00–07:00 UTC today)
+        asian_mask = (
+            (df_h1.index.date == today) &
+            (df_h1.index.hour >= 0) &
+            (df_h1.index.hour < 7)
+        )
+        df_asian = df_h1[asian_mask]
+
+        # Fallback : hier si données du jour insuffisantes
+        if len(df_asian) < 2:
+            yesterday  = (now_utc - pd.Timedelta(days=1)).date()
+            asian_mask = (
+                (df_h1.index.date == yesterday) &
+                (df_h1.index.hour >= 0) &
+                (df_h1.index.hour < 7)
+            )
+            df_asian = df_h1[asian_mask]
+
+        if len(df_asian) < 2:
+            return empty
+
+        asian_high  = float(df_asian["High"].max())
+        asian_low   = float(df_asian["Low"].min())
+        asian_range = asian_high - asian_low
+        sweep_tol   = max(asian_range * 0.20, 10.0)
+
+        # Candles de manipulation (07:00–10:00 UTC)
+        manip_mask = (
+            (df_h1.index.date == today) &
+            (df_h1.index.hour >= 7) &
+            (df_h1.index.hour < 10)
+        )
+        df_manip = df_h1[manip_mask]
+
+        current_hour = now_utc.hour + now_utc.minute / 60
+        if current_hour < 7 or df_manip.empty:
+            return {**empty, "phase": "A", "asian_high": round(asian_high, 2),
+                    "asian_low": round(asian_low, 2), "asian_range": round(asian_range, 2)}
+
+        manip_high = float(df_manip["High"].max())
+        manip_low  = float(df_manip["Low"].min())
+
+        swept_high = manip_high > asian_high + sweep_tol
+        swept_low  = manip_low  < asian_low  - sweep_tol
+
+        if swept_high and swept_low:
+            last_close        = float(df_manip["Close"].iloc[-1])
+            mid               = (asian_high + asian_low) / 2
+            manipulation_type = "SWEEP_BOTH_BULLISH" if last_close > mid else "SWEEP_BOTH_BEARISH"
+            direction         = "LONG"               if last_close > mid else "SHORT"
+        elif swept_low:
+            manipulation_type, direction = "SWEEP_LOW",  "LONG"
+        elif swept_high:
+            manipulation_type, direction = "SWEEP_HIGH", "SHORT"
+        else:
+            manipulation_type, direction = "NO_SWEEP",   "NONE"
+
+        if current_hour < 10:
+            phase = "M"
+        elif current_hour < 13.5:
+            phase = "M_DONE"
+        else:
+            phase = "D"
+
+        confidence = 0
+        if manipulation_type not in ("NO_SWEEP", "NONE"):
+            confidence += 1
+        if phase in ("M_DONE", "D"):
+            confidence += 1
+        if direction != "NONE":
+            last_m = float(df_manip["Close"].iloc[-1])
+            if (direction == "LONG" and last_m > asian_low) or \
+               (direction == "SHORT" and last_m < asian_high):
+                confidence += 1
+
+        return {
+            "phase":             phase,
+            "direction":         direction,
+            "asian_high":        round(asian_high,  2),
+            "asian_low":         round(asian_low,   2),
+            "asian_range":       round(asian_range, 2),
+            "swept_high":        swept_high,
+            "swept_low":         swept_low,
+            "manipulation_type": manipulation_type,
+            "confidence":        confidence,
+        }
+
+    except Exception as e:
+        log.debug(f"[AMD] Détection erreur: {e}")
+        return empty
+
+
+def detect_amd_fvg(df_h1: pd.DataFrame, amd_data: dict) -> dict | None:
+    """
+    FVGs institutionnels créés pendant la phase M (07:00–10:00 UTC).
+    Seuil 0.15×ATR (plus sensible que FVG standard à 0.3×ATR).
+    """
+    if not amd_data or amd_data.get("manipulation_type") in ("NO_SWEEP", "NONE", "UNKNOWN"):
+        return None
+    if df_h1.empty or len(df_h1) < 5:
+        return None
+
+    try:
+        now_utc   = pd.Timestamp.now(tz="UTC")
+        today     = now_utc.date()
+        direction = amd_data.get("direction", "NONE")
+
+        manip_mask = (
+            (df_h1.index.date == today) &
+            (df_h1.index.hour >= 7) &
+            (df_h1.index.hour < 10)
+        )
+        df_m = df_h1[manip_mask]
+
+        if len(df_m) < 3:
+            return None
+
+        atr_val  = float(_atr(df_h1).iloc[-1])
+        min_size = atr_val * 0.15
+
+        for i in range(len(df_m) - 2):
+            c0, c2 = df_m.iloc[i], df_m.iloc[i + 2]
+
+            if direction == "LONG" and c2["Low"] > c0["High"]:
+                size = c2["Low"] - c0["High"]
+                if size >= min_size:
+                    return {
+                        "type":   "AMD_BULLISH_FVG",
+                        "top":    round(c2["Low"],  2),
+                        "bottom": round(c0["High"], 2),
+                        "mid":    round((c2["Low"] + c0["High"]) / 2, 2),
+                        "time":   df_m.index[i + 1],
+                        "phase":  "M",
+                    }
+            elif direction == "SHORT" and c2["High"] < c0["Low"]:
+                size = c0["Low"] - c2["High"]
+                if size >= min_size:
+                    return {
+                        "type":   "AMD_BEARISH_FVG",
+                        "top":    round(c0["Low"],  2),
+                        "bottom": round(c2["High"], 2),
+                        "mid":    round((c0["Low"] + c2["High"]) / 2, 2),
+                        "time":   df_m.index[i + 1],
+                        "phase":  "M",
+                    }
+        return None
+
+    except Exception as e:
+        log.debug(f"[AMD FVG] Erreur: {e}")
+        return None
+
+
+# ── CISD + LIQ+CISD+FVG (ICT combo) ─────────────────────────────────────────
+
+def detect_cisd(df: pd.DataFrame, lookback: int = 8) -> dict:
+    """
+    Change in State of Delivery (CISD) — ICT.
+
+    Une bougie change l'état de livraison quand elle clôture au-delà
+    de l'ouverture de la bougie précédente dans la direction opposée,
+    après une série de bougies dans la même direction (livraison établie).
+
+    CISD haussier (signal LONG) :
+      - ≥2 bougies baissières consécutives (livraison bearish établie)
+      - Bougie suivante clôture AU-DESSUS de l'ouverture de la précédente bearish
+      → le marché passe d'une livraison bearish à bullish
+
+    CISD baissier (signal SHORT) :
+      - ≥2 bougies haussières consécutives (livraison bullish établie)
+      - Bougie suivante clôture EN-DESSOUS de l'ouverture de la précédente bullish
+      → le marché passe d'une livraison bullish à bearish
+    """
+    empty = {"cisd": False, "type": "NONE", "strength": 0, "prev_open": 0.0}
+
+    if df is None or len(df) < lookback + 2:
+        return empty
+
+    recent = df.iloc[-(lookback + 2):]
+    opens  = recent["Open"].to_numpy()
+    closes = recent["Close"].to_numpy()
+    n = len(opens)
+
+    for i in range(n - 1, max(1, n - 4), -1):
+        prev_open  = opens[i - 1]
+        prev_close = closes[i - 1]
+        curr_close = closes[i]
+        curr_open  = opens[i]
+
+        prev_bearish = prev_close < prev_open
+        prev_bullish = prev_close > prev_open
+        curr_bullish = curr_close > curr_open
+        curr_bearish = curr_close < curr_open
+
+        # CISD haussier
+        if prev_bearish and curr_bullish and curr_close > prev_open:
+            bear_count = sum(
+                1 for j in range(max(0, i - 5), i - 1)
+                if closes[j] < opens[j]
+            )
+            if bear_count >= 2:
+                return {
+                    "cisd":      True,
+                    "type":      "BULLISH_CISD",
+                    "strength":  bear_count,
+                    "prev_open": round(float(prev_open), 2),
+                }
+
+        # CISD baissier
+        if prev_bullish and curr_bearish and curr_close < prev_open:
+            bull_count = sum(
+                1 for j in range(max(0, i - 5), i - 1)
+                if closes[j] > opens[j]
+            )
+            if bull_count >= 2:
+                return {
+                    "cisd":      True,
+                    "type":      "BEARISH_CISD",
+                    "strength":  bull_count,
+                    "prev_open": round(float(prev_open), 2),
+                }
+
+    return empty
+
+
+def detect_liq_cisd_fvg(
+    df_h1: pd.DataFrame,
+    atr: float,
+    direction: str,
+    fvgs: list | None = None,
+    eq_hl: dict | None = None,
+) -> dict:
+    """
+    Setup ICT complet : LIQ → CISD → FVG.
+
+    Séquence pour LONG :
+      1. LIQ  : sweep du SSL (Equal Lows) ou sweep bullish confirmé
+      2. CISD : bougie bullish clôture > ouverture de la précédente bearish
+      3. FVG  : imbalance bullish créée par l'impulsion post-CISD
+
+    Retourne un niveau de qualité (HIGH / MEDIUM / LOW / NONE)
+    et les composantes confirmées.
+    """
+    empty = {
+        "confirmed":  False,
+        "quality":    "NONE",
+        "components": 0,
+        "liq_level":  None,
+        "cisd":       None,
+        "fvg":        None,
+    }
+
+    if df_h1 is None or len(df_h1) < 10 or atr <= 0:
+        return empty
+
+    # ── 1. LIQ sweep ──────────────────────────────────────────────────────────
+    sweep_data = detect_liquidity_sweep(df_h1, atr)
+    liq_ok = (
+        (direction == "LONG"  and sweep_data["sweep"] == "BULLISH" and sweep_data["confirmation"]) or
+        (direction == "SHORT" and sweep_data["sweep"] == "BEARISH" and sweep_data["confirmation"])
+    )
+    liq_source = "SWEEP" if liq_ok else None
+
+    # Fallback LIQ : Equal Highs/Lows (piscines non encore sweepées)
+    if not liq_ok and eq_hl:
+        if direction == "LONG"  and eq_hl.get("near_eql"):
+            liq_ok, liq_source = True, "EQL"
+        elif direction == "SHORT" and eq_hl.get("near_eqh"):
+            liq_ok, liq_source = True, "EQH"
+
+    # ── 2. CISD ───────────────────────────────────────────────────────────────
+    cisd = detect_cisd(df_h1)
+    cisd_ok = cisd["cisd"] and (
+        (direction == "LONG"  and cisd["type"] == "BULLISH_CISD") or
+        (direction == "SHORT" and cisd["type"] == "BEARISH_CISD")
+    )
+
+    # ── 3. FVG dans la direction ───────────────────────────────────────────────
+    fvg_hit = None
+    if fvgs:
+        price   = float(df_h1["Close"].iloc[-1])
+        fvg_hit = price_in_fvg(price, fvgs, direction)
+
+    # ── Score combo ───────────────────────────────────────────────────────────
+    n_ok = sum([liq_ok, cisd_ok, bool(fvg_hit)])
+
+    if n_ok == 3:
+        quality = "HIGH"
+    elif n_ok == 2:
+        quality = "MEDIUM"
+    elif n_ok == 1:
+        quality = "LOW"
+    else:
+        quality = "NONE"
+
+    return {
+        "confirmed":  n_ok >= 2,
+        "quality":    quality,
+        "components": n_ok,
+        "liq_level":  sweep_data.get("swept_level"),
+        "liq_source": liq_source,
+        "cisd":       cisd if cisd_ok else None,
+        "fvg":        fvg_hit,
+    }
+
+
 # ── Moteur de scoring — A+ / A / B ───────────────────────────────────────────
 
 def score_setup(
@@ -1016,6 +1581,10 @@ def score_setup(
     displacement: dict | None = None,
     vol_regime: dict | None = None,
     eq_hl: dict | None = None,
+    amd: dict | None = None,
+    amd_fvg: dict | None = None,
+    liq_cisd_fvg: dict | None = None,
+    sweep_setup: dict | None = None,
 ) -> tuple[int, list[str], list[str]]:
     """
     Attribue un score de confluence. Chaque confluence = +1 point.
@@ -1129,6 +1698,59 @@ def score_setup(
             confluences.append(f"Equal Lows @ support ({eq_hl['eql']}) — liquidité institutionnelle")
         elif direction == "SHORT" and eq_hl["near_eqh"]:
             confluences.append(f"Equal Highs @ résistance ({eq_hl['eqh']}) — liquidité institutionnelle")
+
+    # 17. AMD — Accumulation / Manipulation / Distribution
+    if amd and amd.get("direction") != "NONE" and amd.get("confidence", 0) >= 1:
+        amd_dir   = amd["direction"]
+        amd_phase = amd["phase"]
+        amd_mtype = amd.get("manipulation_type", "NONE")
+        if amd_dir == direction:
+            if amd_phase == "D":
+                confluences.append(
+                    f"AMD Phase D alignée — Distribution {direction} "
+                    f"({amd_mtype}, range asiatique {amd.get('asian_range', 0):.0f} pts)"
+                )
+            elif amd_phase in ("M", "M_DONE"):
+                confluences.append(
+                    f"AMD sweep M confirmé → anticipe {direction} en D "
+                    f"({amd_mtype})"
+                )
+
+    # 17b. AMD FVG institutionnel (créé pendant phase M)
+    if amd_fvg and amd and amd.get("direction") == direction:
+        confluences.append(
+            f"AMD FVG {amd_fvg['type']} [{amd_fvg['bottom']:.0f}–{amd_fvg['top']:.0f}] "
+            f"— zone institutionnelle phase M"
+        )
+
+    # 17c. LIQ+CISD+FVG — setup ICT haute probabilité
+    if liq_cisd_fvg and liq_cisd_fvg.get("confirmed"):
+        q = liq_cisd_fvg["quality"]
+        n = liq_cisd_fvg["components"]
+        pts_label = "+2" if q == "HIGH" else "+1"
+        confluences.append(
+            f"LIQ+CISD+FVG {q} ({n}/3 composantes) — setup ICT {pts_label}"
+        )
+        if q == "HIGH":
+            confluences.append("LIQ+CISD+FVG bonus — combo complet (3/3)")
+
+    # 17d. Sweep Setup ICT — stop-hunt multi-niveau + FVG post-sweep
+    if sweep_setup and sweep_setup.get("confirmed"):
+        q   = sweep_setup["quality"]
+        age = sweep_setup["age_bars"]
+        lvl = sweep_setup["swept_level"]
+        pts = "+2" if q == "HIGH" else "+1"
+        confluences.append(
+            f"Sweep {sweep_setup['sweep_type']} {q} @ {lvl:.0f} "
+            f"(age={age}H) — stop-hunt institutionnel {pts}"
+        )
+        if sweep_setup["post_sweep_fvg"]:
+            confluences.append(
+                f"FVG post-sweep [{sweep_setup['fvg_entry_zone']['bottom']:.0f}"
+                f"–{sweep_setup['fvg_entry_zone']['top']:.0f}] — zone entrée institutionnelle"
+            )
+        if sweep_setup["retest_done"]:
+            confluences.append("Prix dans FVG post-sweep — entrée active")
 
     # 18. Chikou Span (confirmation institutionnelle Ichimoku)
     if direction == "LONG" and h1.get("chikou_bullish"):
@@ -1276,6 +1898,24 @@ def generate_pro_signal(mtf: dict[str, pd.DataFrame]) -> ProSignal:
                         f"  [M15 FALLBACK] {direction} valide — D1:{d1_bias} H4:{h4_bias} "
                         f"ADX={m15['adx']:.0f} MACD={m15['macd']:.1f}"
                     )
+                    # ── Enrichissement divergence RSI/MACD ───────────────────
+                    try:
+                        div_ok, div_desc = detect_divergence(df_m15, direction)
+                        if div_ok:
+                            sig.confluences.append(f"Divergence {div_desc}")
+                            log.info(f"  [DIVERGENCE] {div_desc}")
+                    except Exception:
+                        pass
+                    # ── Volume Profile (POC) ─────────────────────────────────
+                    try:
+                        poc = calculate_poc(df_h1, 40)
+                        if poc is not None:
+                            poc_dist = abs(poc - sig.entry)
+                            if poc_dist < sig.atr * 0.35:
+                                sig.confluences.append(f"POC @{poc:.0f} ({poc_dist:.0f}pts)")
+                                log.info(f"  [VOL PROFILE] POC @ {poc:.0f} — niveau institutionnel clé")
+                    except Exception:
+                        pass
                     return sig
 
         # ── Chemin scalp M5 (HFT) ─────────────────────────────────────────────
@@ -1309,10 +1949,34 @@ def generate_pro_signal(mtf: dict[str, pd.DataFrame]) -> ProSignal:
                             h4_bias = "SHORT"
 
                     h4_blocks = (h4_bias != "NEUTRE" and h4_bias != m5_dir)
+
+                    # Filtre VWAP — scalp doit être du côté institutionnel du VWAP
+                    vwap_blocks = False
+                    try:
+                        from pro_routines import calc_session_vwap
+                        vwap_info = calc_session_vwap(df_m5)
+                        vwap_val  = vwap_info.get("vwap")
+                        if vwap_val:
+                            last_m5   = float(df_m5["Close"].iloc[-2])
+                            vwap_side = (m5_dir == "LONG" and last_m5 > vwap_val) or \
+                                        (m5_dir == "SHORT" and last_m5 < vwap_val)
+                            if not vwap_side:
+                                vwap_blocks = True
+                                log.warning(
+                                    f"  [M5 SCALP] BLOQUE — {m5_dir} contre VWAP {vwap_val:.0f} "
+                                    f"({'prix < VWAP' if m5_dir == 'LONG' else 'prix > VWAP'})"
+                                )
+                            else:
+                                log.info(f"  [M5 SCALP] VWAP {vwap_val:.0f} confirme {m5_dir}")
+                    except Exception:
+                        pass  # VWAP non disponible → pas de blocage
+
                     if h4_blocks:
                         log.warning(
                             f"  [M5 SCALP] BLOQUE — {m5_dir} contre H4 {h4_bias}"
                         )
+                    elif vwap_blocks:
+                        pass  # déjà loggé ci-dessus
                     else:
                         # Signal M5 scalp validé
                         atr_m5 = m5["atr"]
@@ -1383,6 +2047,7 @@ def generate_pro_signal(mtf: dict[str, pd.DataFrame]) -> ProSignal:
 
     # ── Fair Value Gaps ────────────────────────────────────────────────────────
     fvg_h1  = detect_fvg(df_h1)
+    fvgs    = fvg_h1
     fvg_hit = price_in_fvg(price, fvg_h1, direction) is not None
     sig.fvg_present = fvg_hit
 
@@ -1421,11 +2086,54 @@ def generate_pro_signal(mtf: dict[str, pd.DataFrame]) -> ProSignal:
     # ── Skill 6 : Equal Highs / Lows ─────────────────────────────────────────
     eq_hl_data = detect_equal_highs_lows(df_h1, h1["atr"])
 
+    # ── Skill 7 : AMD structure (Accumulation / Manipulation / Distribution) ──
+    amd_data = detect_amd_structure(df_h1)
+    if amd_data["phase"] != "UNKNOWN":
+        log.info(
+            f"  [AMD] Phase={amd_data['phase']} | "
+            f"Direction={amd_data['direction']} | "
+            f"Sweep={amd_data['manipulation_type']} | "
+            f"Asian [{amd_data['asian_low']:.0f}–{amd_data['asian_high']:.0f}] | "
+            f"Confidence={amd_data['confidence']}/3"
+        )
+
+    # ── Skill 8 : AMD FVG (imbalance phase M) ────────────────────────────────
+    amd_fvg_data = detect_amd_fvg(df_h1, amd_data)
+    if amd_fvg_data:
+        log.info(
+            f"  [AMD FVG] {amd_fvg_data['type']} "
+            f"[{amd_fvg_data['bottom']:.0f}–{amd_fvg_data['top']:.0f}] "
+            f"mid={amd_fvg_data['mid']:.0f}"
+        )
+
+    # ── Skill 9 : LIQ+CISD+FVG combo (ICT haute probabilité) ─────────────────
+    liq_cisd_fvg_data = detect_liq_cisd_fvg(
+        df_h1, h1["atr"], direction, fvgs=fvgs, eq_hl=eq_hl_data
+    )
+    if liq_cisd_fvg_data["confirmed"]:
+        log.info(
+            f"  [LIQ+CISD+FVG] {liq_cisd_fvg_data['quality']} "
+            f"({liq_cisd_fvg_data['components']}/3) "
+            f"LIQ={liq_cisd_fvg_data.get('liq_source','?')} "
+            f"CISD={liq_cisd_fvg_data.get('cisd',False)}"
+        )
+
+    # ── Skill 10 : Sweep Setup ICT (stop-hunt multi-niveau + FVG post-sweep) ──
+    sweep_setup_data = detect_sweep_setup(df_h1, h1["atr"], direction, fvgs=fvgs)
+    if sweep_setup_data["confirmed"]:
+        log.info(
+            f"  [SWEEP] {sweep_setup_data['sweep_type']} {sweep_setup_data['quality']} "
+            f"@ {sweep_setup_data['swept_level']} age={sweep_setup_data['age_bars']}H "
+            f"FVG={sweep_setup_data['post_sweep_fvg']} retest={sweep_setup_data['retest_done']}"
+        )
+
     # ── Scoring (avec tous les nouveaux skills) ────────────────────────────────
     score, confluences, warnings = score_setup(
         direction, d1, h1, ob_hit, fvg_hit, kl_hit, kz, h4_aligned,
         vwap=vwap_data, bos_choch=bos_data, sweep=sweep_data,
         displacement=disp_data, vol_regime=vol_data, eq_hl=eq_hl_data,
+        amd=amd_data, amd_fvg=amd_fvg_data, liq_cisd_fvg=liq_cisd_fvg_data,
+        sweep_setup=sweep_setup_data,
     )
     sig.score       = score
     sig.confluences = confluences
@@ -1486,7 +2194,11 @@ def generate_pro_signal(mtf: dict[str, pd.DataFrame]) -> ProSignal:
         sig.tp3   = round(price + tp3_d, 2)
 
     risk   = abs(sig.sl - sig.entry)
-    reward = abs(sig.tp2 - sig.entry)
+    # Druckenmiller: A+ setups visent 3:1 minimum (TP3), A setups visent 2:1 (TP2)
+    if sig.grade == "A+":
+        reward = abs(sig.tp3 - sig.entry)
+    else:
+        reward = abs(sig.tp2 - sig.entry)
     rr_val = reward / max(risk, 0.01)
 
     # R:R minimum
@@ -1538,9 +2250,29 @@ def generate_pro_signal(mtf: dict[str, pd.DataFrame]) -> ProSignal:
 
     sig.direction   = direction
     sig.rr          = f"1:{round(rr_val, 1)}"
-    # Facteur de volatilité intégré dans le grade (info pour sizing dynamique)
     if vol_data["vol_factor"] < 1.0:
         sig.warnings.append(f"Volume réduit {vol_data['vol_factor']:.0%} (régime {vol_data['regime']})")
+
+    # ── Enrichissement divergence RSI/MACD ────────────────────────────────────
+    try:
+        div_ok, div_desc = detect_divergence(df_h1, direction)
+        if div_ok:
+            sig.confluences.append(f"Divergence {div_desc}")
+            log.info(f"  [DIVERGENCE] {div_desc}")
+    except Exception:
+        pass
+
+    # ── Volume Profile (Point of Control) ────────────────────────────────────
+    try:
+        poc = calculate_poc(df_h1, 40)
+        if poc is not None:
+            poc_dist = abs(poc - sig.entry)
+            if poc_dist < atr * 0.35:
+                sig.confluences.append(f"POC @{poc:.0f} ({poc_dist:.0f}pts)")
+                log.info(f"  [VOL PROFILE] POC @ {poc:.0f} — niveau institutionnel clé")
+    except Exception:
+        pass
+
     return sig
 
 

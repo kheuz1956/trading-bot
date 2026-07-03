@@ -560,16 +560,16 @@ class NewsSurveillanceEngine:
     ) -> tuple[str, float, str]:
         """Traduit le rapport en décision opérationnelle."""
 
-        # ABORT — crise systémique détectée
+        # REDUCE — GEO CRITICAL souvent faux positif (Iran, Hormuz, diplomatie) — volume 50%
         if report.geo_risk == "CRITICAL":
-            return "ABORT", 0.0, f"Crise géopolitique critique: {report.geo_headline[:80]}"
+            return "REDUCE", 0.5, f"GEO CRITICAL — volume reduit 50%: {report.geo_headline[:60]}"
 
         if report.composite_score < -0.60:
             return "ABORT", 0.0, f"Sentiment global effondré ({report.composite_score:.2f}) — news très négatives"
 
-        # PAUSE — risque élevé mais pas critique
+        # REDUCE — risque géopolitique élevé mais pas critique (volume 50%)
         if report.geo_risk == "HIGH":
-            return "PAUSE", 0.0, f"Risque géopolitique élevé: {report.geo_headline[:80]}"
+            return "REDUCE", 0.5, f"GEO HIGH — volume reduit 50%: {report.geo_headline[:60]}"
 
         if report.composite_score < -0.40:
             return "PAUSE", 0.0, f"Sentiment négatif fort ({report.composite_score:.2f})"

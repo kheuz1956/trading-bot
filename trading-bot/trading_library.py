@@ -279,7 +279,8 @@ def elder_triple_screen(
     }
 
     # Triple Screen Validated ?
-    s1_ok = screens["S1"]["signal"] == direction
+    # NEUTRE = D1 sans tendance claire, pas une opposition — Screen 1 ne bloque pas
+    s1_ok = screens["S1"]["signal"] in (direction, "NEUTRE")
     s2_ok = screens.get("S2", {}).get("signal") == direction
     s3_ok = screens["S3"]["valid"]
 
@@ -326,7 +327,10 @@ def full_library_assessment(state: dict, signal_data: dict) -> dict:
     """
     consecutive_losses = state.get("consecutive_losses", 0)
     last_reason = state.get("last_close_reason", "tp")
+    daily_losses = state.get("daily_losses", 0)
+    post_breaker = state.get("post_breaker", False)
     capital = 283000.0  # Valeur de référence DEMO
+    max_daily_losses = 2  # mirrors config.MAX_DAILY_LOSSES
 
     # 1. Douglas
     douglas = DouglasCheck().evaluate(consecutive_losses, last_reason)
@@ -348,12 +352,16 @@ def full_library_assessment(state: dict, signal_data: dict) -> dict:
         direction=signal_data.get("direction", "SKIP")
     )
 
+    # Grade minimum requis : A-only en mode post-breaker, sinon A/B/C
+    required_grades = {"A"} if post_breaker else {"A", "B", "C"}
+
     # Verdict final
     can_trade = (
         douglas.is_valid and
         steenbarger.status not in ("CIRCUIT_BREAKER", "SEMAINE_TERMINEE") and
-        murphy["grade"] in ("A", "B", "C") and
-        elder["validated"]
+        murphy["grade"] in required_grades and
+        elder["validated"] and
+        daily_losses < max_daily_losses
     )
 
     verdict = "TRADE" if can_trade else "ATTENTE"
@@ -363,14 +371,23 @@ def full_library_assessment(state: dict, signal_data: dict) -> dict:
         reasons.append("Douglas: checklist psychologique non validée")
     if steenbarger.status == "CIRCUIT_BREAKER":
         reasons.append(f"Steenbarger: CIRCUIT BREAKER ({consecutive_losses} pertes consec.)")
-    if murphy["grade"] == "F":
-        reasons.append(f"Murphy: score de confluence insuffisant ({murphy['score']}/100)")
+    if murphy["grade"] not in required_grades:
+        if post_breaker:
+            reasons.append(f"Post-breaker: Grade A uniquement requis (signal Grade {murphy['grade']})")
+        elif murphy["grade"] == "F":
+            reasons.append(f"Murphy: score de confluence insuffisant ({murphy['score']}/100)")
     if not elder["validated"]:
         reasons.append("Elder: Triple Screen non aligné")
+    if daily_losses >= max_daily_losses:
+        reasons.append(f"Max pertes journalières atteint ({daily_losses}/{max_daily_losses}) — session terminée")
 
     # Quote du livre le plus pertinent
     if consecutive_losses >= 4:
         quote = "Livermore: 'After a string of losses, the market is telling you something.'"
+    elif daily_losses >= max_daily_losses:
+        quote = "Steenbarger: 'When the market beats you twice in a day, it owns you. Stop.'"
+    elif post_breaker:
+        quote = "Douglas: 'Reduce size, accept imperfection, rebuild consistency.'"
     elif not elder["validated"]:
         quote = "Elder: 'The markets are never wrong. Opinions often are.'"
     elif murphy["grade"] == "F":
@@ -388,6 +405,8 @@ def full_library_assessment(state: dict, signal_data: dict) -> dict:
                         "sizing": steenbarger.sizing_multiplier},
         "elder": {"validated": elder["validated"],
                   "quality": elder.get("quality", "UNKNOWN")},
+        "post_breaker": post_breaker,
+        "daily_losses": daily_losses,
         "quote": quote,
     }
 
@@ -395,6 +414,10 @@ def full_library_assessment(state: dict, signal_data: dict) -> dict:
     log.info(f"  [LIBRARY] Verdict: {verdict} | Douglas: {douglas.is_valid} | "
              f"Murphy: {murphy['grade']} | Steenbarger: {steenbarger.status} | "
              f"Elder: {elder['validated']}")
+    if post_breaker:
+        log.info(f"  [LIBRARY] Mode reprise post-breaker actif — Grade A only, demi-taille")
+    if daily_losses:
+        log.info(f"  [LIBRARY] Pertes aujourd'hui: {daily_losses}/{max_daily_losses}")
     if reasons:
         for r in reasons:
             log.warning(f"  [LIBRARY] BLOCAGE: {r}")

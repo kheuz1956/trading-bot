@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import os
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -21,6 +22,7 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
+import aiohttp
 import numpy as np
 import pandas as pd
 import yfinance as yf
@@ -33,6 +35,11 @@ from macro_intelligence import MacroIntelligenceEngine
 from economic_calendar import EconomicCalendarEngine
 from news_surveillance import NewsSurveillanceEngine
 from strategy_pro import load_mtf, generate_pro_signal, print_pro_signal, ProSignal
+from market_regime import classify_regime, regime_summary
+from kronos_model import evaluate_kronos, kronos_summary
+from session_analytics import (
+    load_history, compute_kelly, record_trade, print_analytics_report
+)
 
 load_dotenv()
 
@@ -317,6 +324,238 @@ class SessionTracker:
         log.info(sep)
 
 
+class CdpPage:
+    """Thin wrapper around Chrome CDP WebSocket — mimics the Playwright Page API subset used by this bot."""
+
+    def __init__(self, tab_info: dict, session: aiohttp.ClientSession):
+        self._ws_url  = tab_info["webSocketDebuggerUrl"]
+        self._url_val = tab_info["url"]
+        self._session = session
+        self._ws      = None
+        self._msg_id  = 0
+
+    async def connect(self):
+        self._ws = await self._session.ws_connect(self._ws_url)
+
+    async def close(self):
+        if self._ws and not self._ws.closed:
+            await self._ws.close()
+
+    @property
+    def url(self) -> str:
+        return self._url_val
+
+    async def evaluate(self, expression: str):
+        if not self._ws or self._ws.closed:
+            raise RuntimeError("CDP WebSocket not connected")
+        self._msg_id += 1
+        req_id = self._msg_id
+        await self._ws.send_str(json.dumps({
+            "id": req_id,
+            "method": "Runtime.evaluate",
+            "params": {"expression": expression, "awaitPromise": True, "returnByValue": True},
+        }))
+        while True:
+            raw = await asyncio.wait_for(self._ws.receive_str(), timeout=15.0)
+            data = json.loads(raw)
+            if data.get("id") != req_id:
+                continue
+            result = data.get("result", {})
+            exc = result.get("exceptionDetails")
+            if exc:
+                raise RuntimeError(f"CDP JS: {exc.get('text','error')}")
+            val = result.get("result", {})
+            return val.get("value")
+
+    async def screenshot(self, path: str = None):
+        pass  # debug screenshots disabled in CDP mode
+
+    async def reload(self, timeout: int = 15000):
+        self._msg_id += 1
+        await self._ws.send_str(json.dumps({"id": self._msg_id, "method": "Page.reload", "params": {}}))
+        await asyncio.sleep(3)
+
+    async def goto(self, url: str, wait_until: str = "domcontentloaded", timeout: int = 30000):
+        """Navigate via CDP Page.navigate command."""
+        self._msg_id += 1
+        req_id = self._msg_id
+        await self._ws.send_str(json.dumps({
+            "id": req_id,
+            "method": "Page.navigate",
+            "params": {"url": url},
+        }))
+        deadline = __import__("time").monotonic() + 10.0
+        while __import__("time").monotonic() < deadline:
+            try:
+                raw = await asyncio.wait_for(self._ws.receive_str(), timeout=5.0)
+                data = json.loads(raw)
+                if data.get("id") == req_id:
+                    break
+            except asyncio.TimeoutError:
+                break
+        await asyncio.sleep(3.0)
+        self._url_val = url
+
+    async def wait_for_url(self, pattern: str, timeout: int = 30000):
+        """Poll window.location.href until pattern matches."""
+        import time as _time
+        deadline = _time.monotonic() + timeout / 1000
+        fragment = pattern.replace("**/", "").replace("**", "").replace("*", "")
+        while True:
+            try:
+                current = await self.evaluate("window.location.href")
+                if current:
+                    self._url_val = current
+                    if fragment in current:
+                        return
+            except Exception:
+                pass
+            if _time.monotonic() >= deadline:
+                raise PWTimeout(f"wait_for_url timeout: {pattern}")
+            await asyncio.sleep(0.5)
+
+    def _selector_js(self, selector: str) -> str:
+        """Convert Playwright selector to JS expression returning an element."""
+        # Handle comma-separated compound selectors — try each part
+        parts = [s.strip() for s in selector.split(',')]
+        clauses = []
+        for part in parts:
+            if part.startswith('text='):
+                text = part[5:].replace("'", "\\'")
+                clauses.append(
+                    f"Array.from(document.querySelectorAll('*')).find(e => e.offsetParent !== null && e.innerText && e.innerText.trim() === '{text}')"
+                )
+            elif ':has-text(' in part:
+                m = __import__('re').search(r':has-text\(["\']([^"\']+)["\']\)', part)
+                base = __import__('re').sub(r':has-text\([^)]+\)', '', part).strip()
+                text = m.group(1).replace("'", "\\'") if m else ''
+                q = base or '*'
+                clauses.append(
+                    f"Array.from(document.querySelectorAll({json.dumps(q)})).find(e => e.offsetParent !== null && e.innerText && e.innerText.includes('{text}'))"
+                )
+            else:
+                clauses.append(f"document.querySelector({json.dumps(part)})")
+        return ' || '.join(clauses)
+
+    async def _find_element(self, selector: str, timeout: int = 30000):
+        """Poll until element matching selector is found, or raise PWTimeout."""
+        import time as _time
+        deadline = _time.monotonic() + timeout / 1000
+        expr = f"({self._selector_js(selector)}) != null"
+        while True:
+            found = await self.evaluate(expr)
+            if found:
+                return
+            if _time.monotonic() >= deadline:
+                raise PWTimeout(f"Timeout: element not found: {selector}")
+            await asyncio.sleep(0.3)
+
+    async def click(self, selector: str, click_count: int = 1, timeout: int = 30000):
+        await self._find_element(selector, timeout)
+        js = self._selector_js(selector)
+        for _ in range(click_count):
+            await self.evaluate(f"(function(){{ const el = {js}; if(el) el.click(); return !!el; }})()")
+
+    async def fill(self, selector: str, value: str, timeout: int = 30000):
+        await self._find_element(selector, timeout)
+        js = self._selector_js(selector)
+        escaped = json.dumps(str(value))
+        # 1. Focus + native setter + Angular events
+        await self.evaluate(f"""(function(){{
+            const el = {js};
+            if (!el) return false;
+            el.focus();
+            el.click();
+            // Clear existing value
+            el.select();
+            const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;
+            setter.call(el, {escaped});
+            el.dispatchEvent(new Event('input', {{bubbles:true, composed:true}}));
+            el.dispatchEvent(new Event('change', {{bubbles:true, composed:true}}));
+            el.dispatchEvent(new KeyboardEvent('keyup', {{bubbles:true}}));
+            // Angular reactive form update
+            try {{
+                const ngEl = window.ng && window.ng.getContext && window.ng.getContext(el);
+                if (ngEl && ngEl.valueAccessor) ngEl.valueAccessor.onChange({escaped});
+            }} catch(e) {{}}
+            return true;
+        }})()""")
+        # 2. Backup: CDP Input.insertText (triggers Zone.js interceptors)
+        try:
+            # Select all existing text first via JS
+            await self.evaluate(f"(function(){{ const el = {js}; if(el) el.select(); }})()")
+            # Type character by character via CDP to trigger Angular
+            self._msg_id += 1
+            await self._ws.send_str(json.dumps({
+                "id": self._msg_id,
+                "method": "Input.insertText",
+                "params": {"text": str(value)},
+            }))
+            await asyncio.sleep(0.3)
+        except Exception:
+            pass
+
+    def locator(self, selector: str) -> 'CdpLocator':
+        return CdpLocator(self, selector)
+
+
+class CdpLocator:
+    """Minimal Playwright Locator emulation over CdpPage."""
+
+    def __init__(self, page: 'CdpPage', selector: str):
+        self._page = page
+        self._selector = selector
+
+    @property
+    def first(self) -> 'CdpLocator':
+        return self
+
+    def or_(self, other: 'CdpLocator') -> 'CdpLocator':
+        return CdpLocator(self._page, f"{self._selector}, {other._selector}")
+
+    def filter(self, **kwargs) -> 'CdpLocator':
+        return self
+
+    async def click(self, click_count: int = 1, timeout: int = 30000):
+        await self._page.click(self._selector, click_count=click_count, timeout=timeout)
+
+    async def fill(self, value: str, timeout: int = 30000):
+        await self._page.fill(self._selector, value, timeout=timeout)
+
+    async def press(self, key: str, timeout: int = 30000):
+        # Focus the element first, then use CDP Input.dispatchKeyEvent (real hardware-level events)
+        # Angular Zone.js intercepts these, unlike DOM-dispatched KeyboardEvents
+        js = self._page._selector_js(self._selector)
+        await self._page.evaluate(f"(function(){{ const el = {js}; if (el) el.focus(); }})()")
+        await asyncio.sleep(0.1)
+        key_code = 13 if key == "Enter" else (ord(key[0]) if len(key) == 1 else 0)
+        dom_key = "Enter" if key == "Enter" else key
+        dom_code = "Enter" if key == "Enter" else f"Key{key[0].upper()}"
+        for ev_type in ("keyDown", "keyUp"):
+            self._page._msg_id += 1
+            await self._page._ws.send_str(json.dumps({
+                "id": self._page._msg_id,
+                "method": "Input.dispatchKeyEvent",
+                "params": {
+                    "type": ev_type,
+                    "key": dom_key,
+                    "code": dom_code,
+                    "windowsVirtualKeyCode": key_code,
+                    "nativeVirtualKeyCode": key_code,
+                    "modifiers": 0,
+                },
+            }))
+            await asyncio.sleep(0.15)
+
+    async def wait_for(self, state: str = None, timeout: int = 30000):
+        await self._page._find_element(self._selector, timeout)
+
+    async def inner_text(self) -> str:
+        js = self._page._selector_js(self._selector)
+        result = await self._page.evaluate(f"(function(){{ const el = {js}; return el ? el.innerText : null; }})()")
+        return result or ''
+
+
 class XStation5Bot:
 
     LOGIN_URL   = "https://xstation5.xtb.com/?branch=int#/_/login"
@@ -344,10 +583,30 @@ class XStation5Bot:
         # Circuit breaker — protection contre pertes consecutives
         self._consecutive_losses: int      = 0
         self._circuit_breaker_until: float = 0.0   # timestamp unix
+        # Cooldown après clôture de position
+        self._cooldown_until: float        = 0.0   # timestamp unix
+        # Timestamp de placement de l'ordre courant (fallback position check)
+        self._order_placed_at: float       = 0.0
+        # Compteur journalier (persiste entre redémarrages, reset à minuit UTC)
+        self._daily_trade_count: int       = 0
+        self._trade_date: str              = ""    # YYYY-MM-DD UTC
         self._last_signal_type: str | None = None  # ex: "M15-SHORT"
+        self._last_loss_time: float        = 0.0   # timestamp perte (pour expiration dedup)
+        # Régime de marché courant
+        self._current_regime: str          = "UNKNOWN"
+        # Grade et kill zone pour le trade ouvert (pour trade recording)
+        self._current_grade:    str        = "B"
+        self._current_kill_zone: str       = ""
+        # KRONOS — multiplicateur de sizing temporel
+        self._kronos_mult: float           = 1.0
 
     def _save_state(self):
         """Persiste l'état du trade en cours + dernier trade clôturé sur disque."""
+        # entry_time en ISO pour compatibilité signal_runner.py (évite reset auto)
+        entry_time_iso = None
+        if self._order_placed_at:
+            from datetime import timezone as _tz
+            entry_time_iso = datetime.fromtimestamp(self._order_placed_at, tz=_tz.utc).isoformat()
         STATE_FILE.write_text(json.dumps({
             "entry_price":        self._entry_price,
             "trade_side":         self._trade_side,
@@ -357,21 +616,39 @@ class XStation5Bot:
             "consecutive_losses": self._consecutive_losses,
             "trail_stop":         self._trail_stop,
             "current_volume":     self._current_volume,
+            "order_placed_at":    self._order_placed_at,
+            "entry_time":         entry_time_iso,
+            "daily_trade_count":  self._daily_trade_count,
+            "trade_date":         self._trade_date,
+            "cooldown_until":     self._cooldown_until,
+            "daily_losses":       self._consecutive_losses,
+            "sl":                 self._trail_stop,  # SL courant (initial ou trail)
         }), encoding="utf-8")
 
     def _load_state(self):
         """Restaure l'état depuis le disque (survit aux redémarrages)."""
         if STATE_FILE.exists():
             try:
-                data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+                data = json.loads(STATE_FILE.read_text(encoding="utf-8-sig"))  # tolère BOM PowerShell
                 self._entry_price         = data.get("entry_price")
                 self._trade_side          = data.get("trade_side")
                 self._tp1_done            = data.get("tp1_done", False)
                 self._last_entry_price    = data.get("last_entry_price")
                 self._last_trade_side     = data.get("last_trade_side")
                 self._consecutive_losses  = data.get("consecutive_losses", 0)
-                self._trail_stop          = data.get("trail_stop")
+                self._trail_stop          = data.get("trail_stop") or data.get("sl")
                 self._current_volume      = data.get("current_volume", config.VOLUME)
+                self._order_placed_at     = data.get("order_placed_at", 0.0)
+                self._cooldown_until      = data.get("cooldown_until", 0.0)
+                saved_date                = data.get("trade_date", "")
+                today_utc                 = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                if saved_date == today_utc:
+                    self._daily_trade_count = data.get("daily_trade_count", 0)
+                    self._trade_date        = saved_date
+                else:
+                    self._daily_trade_count = 0
+                    self._trade_date        = today_utc
+                    log.info(f"Nouveau jour UTC ({today_utc}) — compteur journalier remis à zéro")
                 log.info(
                     f"État restauré: {self._trade_side} @ {self._entry_price} "
                     f"(tp1_done={self._tp1_done}, trail_stop={self._trail_stop}, "
@@ -389,37 +666,112 @@ class XStation5Bot:
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     async def start(self):
-        self._pw = await async_playwright().start()
+        self._pw       = None
+        self._browser  = None
+        self._cdp_sess = None   # aiohttp ClientSession for CDP
 
-        # Essayer de se connecter au Chrome existant (lancé avec --remote-debugging-port=9222)
+        # 1. CDP WebSocket direct sur Chrome existant (port 9222) — pas Playwright
         try:
-            self._browser = await self._pw.chromium.connect_over_cdp("http://localhost:9222")
-            # Récupérer la page XStation5 si déjà ouverte, sinon en créer une
-            contexts = self._browser.contexts
-            pages    = contexts[0].pages if contexts else []
-            xtb_page = next((p for p in pages if "xstation5" in p.url), None)
-            if xtb_page:
-                self._page = xtb_page
-                log.info(f"Connecté au Chrome existant — onglet XStation5 trouvé: {self._page.url}")
+            sess = aiohttp.ClientSession()
+            async with sess.get("http://localhost:9222/json/list", timeout=aiohttp.ClientTimeout(total=4)) as r:
+                tabs = await r.json(content_type=None)
+            xtb_tab = next((t for t in tabs if "xstation5" in t.get("url", "") and t.get("type") == "page"), None)
+            if xtb_tab:
+                cdp_page = CdpPage(xtb_tab, sess)
+                await cdp_page.connect()
+                self._page     = cdp_page
+                self._cdp_sess = sess
+                log.info(f"CDP WebSocket connecté — XStation5 loggedIn: {xtb_tab['url'][:60]}")
+                return
             else:
-                self._page = await contexts[0].new_page() if contexts else await self._browser.new_page()
-                log.info("Connecté au Chrome existant — nouvel onglet créé")
+                await sess.close()
+                log.warning("CDP: Chrome actif mais aucun onglet XStation5 trouvé")
         except Exception as e:
-            log.warning(f"CDP non disponible ({e}) — lancement d'un nouveau Chrome")
-            self._browser = await self._pw.chromium.launch(
+            log.warning(f"CDP direct non disponible ({e.__class__.__name__}) — Playwright fallback")
+
+        # 2. Fallback Playwright (async_playwright)
+        import pathlib
+        self._pw = await async_playwright().start()
+        profile_dir = pathlib.Path(__file__).parent / ".playwright_profile"
+        profile_dir.mkdir(exist_ok=True)
+        try:
+            ctx = await self._pw.chromium.launch_persistent_context(
+                str(profile_dir),
                 headless=False,
-                channel="chrome",
-                args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+                viewport={"width": 1400, "height": 900},
+                args=["--no-sandbox", "--disable-dev-shm-usage"],
             )
-            ctx        = await self._browser.new_context(viewport={"width": 1400, "height": 900})
-            self._page = await ctx.new_page()
-            log.info("Playwright lancé (Chrome nouveau)")
+            self._browser = None
+            self._page    = ctx.pages[0] if ctx.pages else await ctx.new_page()
+            self._ctx     = ctx
+            log.info(f"Playwright lancé — profil persistant: {profile_dir}")
+        except Exception as e2:
+            log.error(f"Playwright launch_persistent_context échoué: {e2}")
+            raise
 
     async def stop(self):
-        if self._browser:
+        # Fermer CDP WebSocket
+        cdp_page = self._page if isinstance(self._page, CdpPage) else None
+        if cdp_page:
+            await cdp_page.close()
+        if self._cdp_sess:
+            await self._cdp_sess.close()
+        # Fermer Playwright si utilisé
+        ctx = getattr(self, "_ctx", None)
+        if ctx:
+            await ctx.close()
+        elif self._browser:
             await self._browser.close()
         if self._pw:
             await self._pw.stop()
+
+    async def _reconnect_browser(self) -> bool:
+        """Reconnect to Chrome/xStation5 after browser crash or closure."""
+        log.warning("Browser déconnecté — tentative de reconnexion automatique...")
+        try:
+            if self._browser:
+                await self._browser.close()
+        except Exception:
+            pass
+
+        _chrome_paths = [
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        ]
+
+        for attempt in range(3):
+            try:
+                self._browser = await self._pw.chromium.connect_over_cdp("http://localhost:9222")
+                contexts = self._browser.contexts
+                pages = contexts[0].pages if contexts else []
+                xtb_page = next((p for p in pages if "xstation5" in p.url), None)
+                if xtb_page:
+                    self._page = xtb_page
+                    log.info(f"  Reconnecté (tentative {attempt+1}) — onglet xStation5 trouvé")
+                    return True
+                self._page = await (contexts[0].new_page() if contexts else self._browser.new_page())
+                await self._page.goto(self.LOGIN_URL, timeout=30000)
+                await asyncio.sleep(5)
+                log.info(f"  Reconnecté (tentative {attempt+1}) — navigation vers xStation5")
+                return True
+            except Exception as e:
+                log.warning(f"  CDP indisponible (tentative {attempt+1}/3): {e}")
+                if attempt < 2:
+                    for chrome_path in _chrome_paths:
+                        if os.path.exists(chrome_path):
+                            subprocess.Popen([
+                                chrome_path,
+                                "--remote-debugging-port=9222",
+                                "--no-first-run",
+                                "--no-default-browser-check",
+                                self.LOGIN_URL,
+                            ])
+                            log.info(f"  Chrome relancé: {chrome_path}")
+                            break
+                    await asyncio.sleep(10)
+
+        log.error("Reconnexion impossible après 3 tentatives")
+        return False
 
     # ── Authentification ──────────────────────────────────────────────────────
 
@@ -465,13 +817,10 @@ class XStation5Bot:
         await pass_input.fill(config.PASSWORD)
         await asyncio.sleep(0.3)
 
-        # Attendre que le formulaire Angular soit pleinement interactif
-        await asyncio.sleep(1.5)
+        # Attendre qu'Angular compile les templates (résolution {{bindings}})
+        await asyncio.sleep(3.0)
 
-        # Stratégie multi-tentatives pour cliquer le bouton submit Angular
-        submitted = None
-
-        # Tentative 1 : bouton submit explicite
+        # Stratégie 1 : clic bouton submit
         submitted = await p.evaluate("""() => {
             const selectors = [
                 'button[type="submit"]',
@@ -483,37 +832,60 @@ class XStation5Bot:
                 const btn = document.querySelector(sel);
                 if (btn && btn.offsetParent !== null) {
                     btn.click();
-                    return btn.innerText.trim().slice(0, 30) || 'submit';
+                    return btn.innerText.trim().slice(0, 30) || 'submit-clicked';
                 }
             }
             return null;
         }""")
-
-        # Tentative 2 : dispatchEvent natif Angular (bypasse les guards ng-click)
-        if not submitted:
-            submitted = await p.evaluate("""() => {
-                const btn = Array.from(document.querySelectorAll('button'))
-                    .find(b => !b.disabled && b.offsetParent !== null
-                               && !b.classList.contains('close'));
-                if (!btn) return null;
-                btn.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
-                return btn.innerText.trim().slice(0, 30) || 'dispatched';
-            }""")
-
         log.info(f"  Bouton login cliqué: '{submitted}'")
 
-        # Tentative 3 : Enter sur le champ password
-        if not submitted:
-            log.warning("  Bouton introuvable — fallback Enter sur password")
-            await pass_input.press("Enter")
+        # Stratégie 2 : Enter via CDP Input.dispatchKeyEvent (Zone.js-compatible)
+        # Toujours exécuté — belt-and-suspenders avec le clic bouton
+        log.info("  Envoi Enter via CDP Input.dispatchKeyEvent sur password...")
+        await pass_input.press("Enter")
 
+        # Stratégie 3 : form.submit() JavaScript direct
+        await asyncio.sleep(0.5)
+        await p.evaluate("""() => {
+            const form = document.querySelector('form');
+            if (form) {
+                try { form.dispatchEvent(new Event('submit', {bubbles:true, cancelable:true})); }
+                catch(e) {}
+                try { form.submit(); } catch(e) {}
+            }
+        }""")
+
+        # Attendre le dashboard OU la 2FA (vérification email)
         try:
-            await p.wait_for_url("**/loggedIn**", timeout=30000)
+            await p.wait_for_url("**/loggedIn**", timeout=15000)
             log.info("Login XStation5 OK")
         except PWTimeout:
-            await p.screenshot(path="login_timeout.png")
-            log.error(f"Login échoué (URL: {p.url}) — vérifier identifiants dans .env")
-            raise
+            # Détecter la dialog de code de vérification (2FA email)
+            twofa_dialog = p.locator('input[placeholder*="code" i], input[placeholder*="vérif" i], .verification-code input, input[type="text"][maxlength]').first
+            try:
+                await twofa_dialog.wait_for(state="visible", timeout=3000)
+                log.warning("  [2FA] Code de vérification requis — vérifier l'email XTB")
+                log.warning("  [2FA] Coller le code dans: trading-bot/2fa_code.txt  (puis patienter)")
+                import pathlib, time as _time
+                code_file = pathlib.Path(__file__).parent / "2fa_code.txt"
+                # Attendre que le fichier soit créé (max 5 minutes)
+                for _ in range(300):
+                    if code_file.exists():
+                        code = code_file.read_text().strip()
+                        if code:
+                            code_file.unlink()
+                            await twofa_dialog.fill(code)
+                            await twofa_dialog.press("Enter")
+                            log.info(f"  [2FA] Code soumis: {code}")
+                            await p.wait_for_url("**/loggedIn**", timeout=15000)
+                            log.info("Login XStation5 OK (2FA validé)")
+                            return
+                    _time.sleep(1)
+                raise RuntimeError("Timeout 2FA — code non fourni dans 5 minutes")
+            except Exception as e2:
+                await p.screenshot(path="login_timeout.png")
+                log.error(f"Login échoué (URL: {p.url}) — {e2}")
+                raise
 
     # ── Navigation ────────────────────────────────────────────────────────────
 
@@ -590,20 +962,113 @@ class XStation5Bot:
 
         log.info(f"  SL/TP configuré: SL={sl_val} TP={tp_val}")
 
+    async def _close_position_in_xtb(self):
+        """Ferme la position ouverte dans XStation5 via CDP JavaScript."""
+        p = self._page
+        try:
+            closed = await p.evaluate("""() => {
+                // Stratégie 1 : sélecteurs CSS directs XStation5
+                const cssSelectors = [
+                    'button.close-position',
+                    'button[class*="close"][class*="position"]',
+                    'button[class*="xs-close"]',
+                    '.open-position button.close',
+                    'a.close-position',
+                    '[data-test="close-position"]',
+                    '[class*="position-close"]',
+                    '[class*="closePosition"]',
+                    'button[class*="close-btn"]',
+                    '.positions-table button.close',
+                    '.trade-close-btn',
+                    'button.btn-close-trade',
+                ];
+                for (const sel of cssSelectors) {
+                    try {
+                        const btns = Array.from(document.querySelectorAll(sel))
+                            .filter(b => b.offsetParent !== null);
+                        if (btns.length) { btns[0].click(); return sel; }
+                    } catch(e) {}
+                }
+
+                // Stratégie 2 : bouton avec aria-label / title contenant "close" ou "fermer"
+                const ariaClose = Array.from(document.querySelectorAll('button, a, span'))
+                    .filter(el => el.offsetParent !== null)
+                    .find(el => {
+                        const label = (el.getAttribute('aria-label') || el.getAttribute('title') || '').toLowerCase();
+                        return label.includes('close') || label.includes('fermer') || label.includes('clore');
+                    });
+                if (ariaClose) { ariaClose.click(); return 'aria-close'; }
+
+                // Stratégie 3 : chercher icône × / X dans les lignes de positions
+                const xButtons = Array.from(document.querySelectorAll('button, span[class*="icon"], i[class*="icon"]'))
+                    .filter(el => el.offsetParent !== null && (el.innerText === '×' || el.innerText === 'X' || el.innerText === '✕'));
+                if (xButtons.length) { xButtons[0].click(); return 'x-icon'; }
+
+                // Stratégie 4 : bouton texte "Fermer" / "Close" / "Clore"
+                const textClose = Array.from(document.querySelectorAll('button'))
+                    .filter(el => el.offsetParent !== null)
+                    .find(el => {
+                        const t = el.innerText.trim().toLowerCase();
+                        return t === 'fermer' || t === 'close' || t === 'clore' || t === 'close position';
+                    });
+                if (textClose) { textClose.click(); return 'text-fermer'; }
+
+                // Stratégie 5 : dump des boutons visibles pour diagnostic
+                const visible = Array.from(document.querySelectorAll('button'))
+                    .filter(b => b.offsetParent !== null)
+                    .map(b => b.className + '|' + b.innerText.trim().slice(0,20))
+                    .slice(0, 10).join(' ; ');
+                return '__BUTTONS:' + visible;
+            }""")
+
+            if closed and not str(closed).startswith('__BUTTONS:'):
+                log.info(f"  Position fermée via XStation5 (selector: {closed})")
+                await asyncio.sleep(1.5)
+                # Confirmer si popup
+                try:
+                    await p.evaluate("""() => {
+                        const btns = Array.from(document.querySelectorAll('button'))
+                            .filter(b => b.offsetParent !== null &&
+                                ['OK','Confirmer','Confirm','Oui','Yes'].includes(b.innerText.trim()));
+                        if (btns.length) { btns[0].click(); return true; }
+                    }""")
+                except Exception:
+                    pass
+            else:
+                if closed and closed.startswith('__BUTTONS:'):
+                    log.warning(f"  Close introuvable. Boutons visibles: {closed[10:]}")
+                else:
+                    log.warning("  Bouton close position introuvable — vérifier XStation5 manuellement")
+                # Fallback : naviguer vers positions et réessayer dans 3s
+                try:
+                    await p.evaluate("() => { const el = document.querySelector('[href*=\"positions\"], [ng-click*=\"position\"], a[class*=\"position\"]'); if(el) el.click(); }")
+                    await asyncio.sleep(2.0)
+                    await p.evaluate("""() => {
+                        const btns = Array.from(document.querySelectorAll('button'))
+                            .filter(b => b.offsetParent !== null);
+                        const closeBtn = btns.find(b => b.className.includes('close') || b.innerText.trim().toLowerCase().includes('close'));
+                        if (closeBtn) { closeBtn.click(); return true; }
+                    }""")
+                except Exception:
+                    pass
+        except Exception as e:
+            log.error(f"  Erreur fermeture position: {e}")
+
     async def place_order(self, signal: str, levels: dict) -> bool:
+        # Verrou absolu — 1 seule position à la fois, sans exception
+        if self._entry_price is not None:
+            log.error(
+                f"  *** ORDRE BLOQUÉ *** entry_price déjà set ({self._entry_price}) — "
+                f"position {self._trade_side} toujours active. Disciplne: 0 doublon toléré."
+            )
+            return False
+
         p = self._page
         try:
             await self.ensure_us100_active()
 
-            # Configurer SL/TP avant l'ordre
-            try:
-                await self._configure_sl_tp(levels["sl"], levels["tp2"])
-            except Exception as e:
-                log.warning(f"SL/TP config partielle: {e}")
-
             # Cliquer SELL ou BUY via les sélecteurs réels XStation5
             if signal == "SHORT":
-                # xs-btn-sell = bouton rouge VENDRE dans le market watch
                 clicked = await p.evaluate("""() => {
                     const btns = Array.from(document.querySelectorAll('button.xs-btn-sell'));
                     const btn = btns.find(b => b.offsetParent !== null) || btns[0];
@@ -620,7 +1085,7 @@ class XStation5Bot:
                 }""")
                 log.info(f"  BUY cliqué @ {clicked}")
 
-            await asyncio.sleep(1)
+            await asyncio.sleep(1.5)
 
             # Confirmer si une popup apparaît
             try:
@@ -631,11 +1096,29 @@ class XStation5Bot:
             except PWTimeout:
                 pass  # Click & Trade = exécution immédiate sans confirmation
 
-            self._entry_price    = levels["entry"]
-            self._trade_side     = signal
-            self._tp1_done       = False
-            self._trail_stop     = None
+            # Enregistrer la position AVANT de tenter SL/TP (garantit que l'état persiste)
+            self._entry_price       = levels["entry"]
+            self._trade_side        = signal
+            self._tp1_done          = False
+            self._trail_stop        = levels.get("sl")  # SL initial comme trail_stop de départ
+            self._order_placed_at   = time.time()
+            self._trade_date        = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            self._daily_trade_count += 1
             self._save_state()
+
+            # Configurer SL/TP APRÈS l'ordre (panel positions ouvertes + pré-trade)
+            await asyncio.sleep(1.0)
+            for attempt in range(2):
+                try:
+                    await self._configure_sl_tp(levels["sl"], levels["tp2"])
+                    break
+                except Exception as e:
+                    if attempt == 0:
+                        log.warning(f"SL/TP tentative 1 échouée ({e}) — retry dans 2s")
+                        await asyncio.sleep(2)
+                    else:
+                        log.warning(f"SL/TP non configuré dans XStation5 — SL software actif @ {levels['sl']}")
+
             log.info(
                 f"  Ordre placé: {signal} @ {levels['entry']} | "
                 f"SL={levels['sl']} TP={levels['tp2']} | Volume={self._current_volume} lots"
@@ -644,6 +1127,19 @@ class XStation5Bot:
 
         except Exception as e:
             log.error(f"  Erreur placement ordre: {e}")
+            _browser_closed = any(k in str(e).lower() for k in (
+                "browser has been closed", "target page", "target closed",
+                "connection refused", "websocket", "session closed",
+            ))
+            if _browser_closed:
+                log.warning("  Browser fermé détecté — reconnexion puis retry...")
+                reconnected = await self._reconnect_browser()
+                if reconnected:
+                    try:
+                        await self.login()
+                    except Exception:
+                        pass
+                    return await self.place_order(signal, levels)
             return False
 
     # ── Gestion de position ouverte ───────────────────────────────────────────
@@ -698,30 +1194,64 @@ class XStation5Bot:
     # ── Lire le prix courant depuis la page ───────────────────────────────────
 
     async def get_current_price(self) -> float | None:
-        """Lit le prix SELL courant de US100 depuis le bouton xs-btn-sell."""
+        """Lit le prix SELL courant — DOM XStation5 d'abord, yfinance en fallback."""
         try:
             price = await self._page.evaluate("""() => {
-                const btns = Array.from(document.querySelectorAll('button.xs-btn-sell'));
+                const btns = Array.from(document.querySelectorAll('button.xs-btn-sell, .sell-price, [class*="sell"][class*="price"], .instrument-price'));
                 const btn  = btns.find(b => b.offsetParent !== null) || btns[0];
-                return btn ? parseFloat(btn.innerText.replace(',', '.')) : null;
+                if (btn) { const v = parseFloat(btn.innerText.replace(/[^0-9.]/g, '')); if (!isNaN(v) && v > 1000) return v; }
+                return null;
             }""")
-            return float(price) if price else None
+            if price and float(price) > 1000:
+                return float(price)
+        except Exception:
+            pass
+        # Fallback yfinance — toujours disponible même si CDP ne voit pas le prix
+        try:
+            import yfinance as yf, pandas as pd
+            df = yf.download("NQ=F", period="1d", interval="1m", progress=False, auto_adjust=True)
+            c = df["Close"].squeeze()
+            return float(c.iloc[-2])
         except Exception:
             return None
 
     async def _has_open_position(self) -> bool:
-        """Vérifie si une position US100 est encore ouverte dans le panel XStation5."""
-        try:
-            count = await self._page.evaluate("""() => {
-                // Lignes de positions ouvertes dans le tableau du bas
-                const rows = document.querySelectorAll(
-                    '.positions-table tbody tr, [ng-repeat*="position"], .open-positions tr[class*="row"]'
-                );
-                return rows.length;
-            }""")
-            return int(count) > 0
-        except Exception:
-            return True  # Incertain → supposer ouverte pour éviter doublon
+        """
+        Détection de clôture basée sur le prix vs SL/trail_stop.
+        N'utilise plus le DOM (sélecteurs xStation5 non fiables).
+        La position est considérée ouverte jusqu'à ce que :
+          1. Le prix ait clairement croisé le SL ou trail_stop (stop-out confirmé)
+          2. L'ordre soit vieux de plus de 24h (position stale)
+        """
+        # Garde-temps : ordre de moins de 5 min → toujours ouvert sans vérification
+        if self._order_placed_at and time.time() - self._order_placed_at < 300:
+            return True
+
+        current = await self.get_current_price()
+        if current is None:
+            return True  # Pas de prix → bénéfice du doute
+
+        # Stop-out basé sur SL / trail_stop
+        sl = self._trail_stop  # Mis à jour par manage_position après TP1
+        if sl is None and self._entry_price:
+            # Fallback : SL initial = entry ± 2× ATR estimé (200 pts)
+            sl = (self._entry_price + 200) if self._trade_side == "SHORT" else (self._entry_price - 200)
+
+        if sl and self._trade_side == "SHORT" and current >= sl:
+            log.warning(f"  SL touché: prix {current:.2f} >= SL {sl:.2f} — fermeture XStation5")
+            await self._close_position_in_xtb()
+            return False
+        if sl and self._trade_side == "LONG" and current <= sl:
+            log.warning(f"  SL touché: prix {current:.2f} <= SL {sl:.2f} — fermeture XStation5")
+            await self._close_position_in_xtb()
+            return False
+
+        # Position stale > 24h
+        if self._order_placed_at and time.time() - self._order_placed_at > 86400:
+            log.warning("  Position > 24h sans clôture détectée — reset forcé")
+            return False
+
+        return True  # Position toujours ouverte
 
     async def _recover_state(self):
         """Restaure l'état depuis le fichier persistant pour éviter les doublons au redémarrage."""
@@ -743,7 +1273,11 @@ class XStation5Bot:
         log.info("=" * 56)
 
         await self.start()
-        await self.login()
+        try:
+            await self.login()
+        except Exception as _le:
+            log.warning(f"  Login initial échoué ({_le.__class__.__name__}) — bot continue en mode scan-only")
+            log.warning("  ACTION REQUISE : Se connecter manuellement à XStation5 dans Chrome")
         await self._recover_state()
 
         # Lancer la surveillance 24/7 en tâche de fond (non bloquante)
@@ -756,12 +1290,23 @@ class XStation5Bot:
                 await self._tick()
             except Exception as e:
                 log.error(f"Erreur tick: {e}", exc_info=True)
-                # Si la page semble déconnectée, recharger
-                try:
-                    await self._page.reload(timeout=15000)
-                    await asyncio.sleep(3)
-                except Exception:
-                    pass
+                _browser_closed = any(k in str(e).lower() for k in (
+                    "browser has been closed", "target page", "target closed",
+                    "connection refused", "websocket", "session closed",
+                ))
+                if _browser_closed:
+                    reconnected = await self._reconnect_browser()
+                    if reconnected:
+                        try:
+                            await self.login()
+                        except Exception:
+                            pass
+                else:
+                    try:
+                        await self._page.reload(timeout=15000)
+                        await asyncio.sleep(3)
+                    except Exception:
+                        await self._reconnect_browser()
 
             elapsed = time.monotonic() - t0
             wait    = max(0, config.SCAN_INTERVAL_SEC - elapsed)
@@ -801,6 +1346,59 @@ class XStation5Bot:
         now = datetime.now(timezone.utc).strftime("%H:%M GMT")
         log.info(f"── SCAN {now} " + "─" * 38)
 
+        # 0a. Daily reset — compteur journalier remis à zéro au passage de minuit UTC
+        today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if self._trade_date and self._trade_date != today_utc:
+            log.info(f"  [DAILY RESET] Nouveau jour {today_utc} — trades J-1: {self._daily_trade_count}")
+            self._daily_trade_count = 0
+            self._trade_date        = today_utc
+            self._save_state()
+
+        # 0b. Vérification session XStation5 — relogin automatique si expirée
+        try:
+            _current_url = await self._page.evaluate("window.location.href")
+            if _current_url:
+                self._page._url_val = _current_url
+            if _current_url and "login" in _current_url and "loggedIn" not in _current_url:
+                log.warning("  [SESSION] XStation5 expirée — relogin automatique en cours...")
+                try:
+                    await self.login()
+                    log.info("  [SESSION] Relogin effectué")
+                except Exception as _login_err:
+                    _notify = os.path.join(os.path.dirname(__file__), "PLEASE_LOGIN.txt")
+                    if not os.path.exists(_notify):
+                        with open(_notify, "w") as _f:
+                            _f.write(
+                                "XStation5 session expirée. Le bot ne peut pas trader.\n"
+                                "Action requise : Ouvrir Chrome, aller sur xstation5.xtb.com\n"
+                                "et se connecter manuellement (une seule fois suffit).\n"
+                                "Ce fichier sera supprimé automatiquement au prochain scan.\n"
+                            )
+                    log.warning(f"  [SESSION] Relogin auto échoué — connexion manuelle requise dans Chrome (PLEASE_LOGIN.txt créé)")
+                    return   # skip ce tick, réessayer au prochain scan
+            else:
+                # Session active — supprimer le fichier d'alerte si présent
+                _notify = os.path.join(os.path.dirname(__file__), "PLEASE_LOGIN.txt")
+                if os.path.exists(_notify):
+                    os.remove(_notify)
+                    log.info("  [SESSION] Session restaurée — PLEASE_LOGIN.txt supprimé")
+        except Exception as _se:
+            log.debug(f"  [SESSION] Vérif URL: {_se}")
+
+        # 0. Force trade override — fichier force_trade.json
+        import os, json as _json
+        _force_file = os.path.join(os.path.dirname(__file__), "force_trade.json")
+        if os.path.exists(_force_file):
+            try:
+                with open(_force_file) as _f:
+                    _ft = _json.load(_f)
+                os.remove(_force_file)
+                log.info(f"  [FORCE] Ordre forcé détecté: {_ft}")
+                await self.place_order(_ft["direction"], _ft)
+                return
+            except Exception as _e:
+                log.warning(f"  [FORCE] Échec lecture force_trade.json: {_e}")
+
         # 1. Gestion position existante
         if self._entry_price:
             still_open = await self._has_open_position()
@@ -815,10 +1413,28 @@ class XStation5Bot:
                         self._trade_side, self._entry_price, current, self._current_volume
                     )
                     self._session.print_stats()
+                    # Session Analytics — enregistrement pour Kelly Criterion
+                    try:
+                        reason = "TP" if pnl > 0 else "SL"
+                        record_trade(
+                            direction  = self._trade_side,
+                            entry      = self._entry_price,
+                            exit_price = current,
+                            volume     = self._current_volume,
+                            grade      = self._current_grade,
+                            kill_zone  = self._current_kill_zone,
+                            regime     = self._current_regime,
+                            reason     = reason,
+                        )
+                    except Exception:
+                        pass
+                self._cooldown_until = time.time() + config.COOLDOWN_AFTER_TRADE_SEC
+                log.info(f"  Cooldown: {config.COOLDOWN_AFTER_TRADE_SEC // 60} min avant prochain trade")
                 if pnl < 0:
                     self._last_entry_price = self._entry_price
                     self._last_trade_side  = self._trade_side
                     self._consecutive_losses += 1
+                    self._last_loss_time = time.time()
                     log.warning(
                         f"  Trade fermé en perte — règle anti-re-entrée activée pour {self._trade_side} "
                         f"| Pertes consécutives: {self._consecutive_losses}"
@@ -848,6 +1464,7 @@ class XStation5Bot:
                 self._trail_stop     = None
                 self._current_volume = config.VOLUME
                 self._save_state()
+                return  # Attendre le prochain scan après clôture (cooldown actif)
             else:
                 current = await self.get_current_price()
                 if current:
@@ -873,6 +1490,20 @@ class XStation5Bot:
             )
             return
 
+        # 2a2. Max trades par jour (persistant entre redémarrages)
+        if self._daily_trade_count >= config.MAX_TRADES_PER_SESSION:
+            log.warning(
+                f"  *** MAX TRADES JOUR *** {self._daily_trade_count}/{config.MAX_TRADES_PER_SESSION} — "
+                f"limite journalière atteinte, reprise demain"
+            )
+            return
+
+        # 2a3. Cooldown post-trade
+        if self._cooldown_until > time.time():
+            remaining = int((self._cooldown_until - time.time()) / 60)
+            log.info(f"  Cooldown post-trade — reprise dans {remaining} min")
+            return
+
         # 2b. Circuit breaker — pause forcée après pertes consécutives
         if self._circuit_breaker_until > time.time():
             remaining = int((self._circuit_breaker_until - time.time()) / 60)
@@ -889,6 +1520,33 @@ class XStation5Bot:
         # 3. Analyse multi-timeframe PRO (D1 + H4 + H1 + OB + FVG + Kill Zone)
         loop = asyncio.get_event_loop()
         mtf  = await loop.run_in_executor(None, load_mtf)
+
+        # 3a. Market Regime Classification (Choppiness Index + ADX + ATR)
+        try:
+            regime = classify_regime(mtf.get("H1"))
+            self._current_regime = regime.name
+            log.info(f"  [REGIME] {regime_summary(regime)}")
+            if not regime.trade_ok:
+                log.warning(
+                    f"  SKIP REGIME {regime.name} (CI={regime.choppiness}) — "
+                    f"stratégie tendance inefficace en marché {'range' if regime.name == 'RANGING' else 'volatile'}"
+                )
+                return
+        except Exception as _re:
+            log.debug(f"  Regime detection error: {_re}")
+
+        # 3b. KRONOS — Time-Cycle Intelligence (Hurst + calendrier + saisonnalité)
+        try:
+            _kronos = evaluate_kronos(mtf.get("H1"), mtf.get("D1"))
+            log.info(f"  [KRONOS] {kronos_summary(_kronos)}")
+            if _kronos.veto:
+                log.warning(f"  SKIP KRONOS: {_kronos.reason}")
+                return
+            self._kronos_mult = _kronos.multiplier
+        except Exception as _ke:
+            log.debug(f"  KRONOS error: {_ke}")
+            self._kronos_mult = 1.0
+
         sig  = generate_pro_signal(mtf)
         print_pro_signal(sig)
 
@@ -933,42 +1591,51 @@ class XStation5Bot:
             return
 
         # 7a. Filtre signal type répété — bloquer le même fallback M15 après une perte
+        #     Expiration automatique après 4h (une session) pour éviter le blocage multi-jours
+        _DEDUP_EXPIRY = 4 * 3600
         current_signal_type = sig.h1_signal  # ex: "M15-SHORT", "M15-LONG", ou signal H1
         if (self._last_signal_type and
                 self._last_signal_type == current_signal_type and
-                self._consecutive_losses > 0):
+                self._consecutive_losses > 0 and
+                time.time() - self._last_loss_time < _DEDUP_EXPIRY):
             log.warning(
                 f"  SKIP signal répété après perte: {current_signal_type} déjà tenté et perdu — "
                 f"attendre un nouveau setup différent"
             )
             return
 
-        # 7b. Filtre re-entrée défavorable
-        # LONG  : n'ouvre pas si nouvel entry > dernier entry LONG  (on n'achète pas plus cher)
-        # SHORT : n'ouvre pas si nouvel entry < dernier entry SHORT (on ne vend pas moins cher)
-        new_entry = sig.to_levels()["entry"]
-        if self._last_entry_price and self._last_trade_side == sig.direction:
-            if sig.direction == "LONG" and new_entry > self._last_entry_price:
-                log.warning(
-                    f"  SKIP re-entrée LONG : {new_entry:.2f} > dernier entry {self._last_entry_price:.2f} "
-                    f"— prix défavorable, attendre repli"
-                )
-                return
-            if sig.direction == "SHORT" and new_entry < self._last_entry_price:
-                log.warning(
-                    f"  SKIP re-entrée SHORT: {new_entry:.2f} < dernier entry {self._last_entry_price:.2f} "
-                    f"— prix défavorable, attendre rebond"
-                )
-                return
+        # 7b. Filtre re-entrée — DÉSACTIVÉ (continuation de tendance autorisée)
 
-        # 8. Sizing dynamique — grade × news factor × volume de base
-        grade_factor   = {"A+": config.VOLUME_A_PLUS, "A": config.VOLUME_A, "B": config.VOLUME_B}.get(sig.grade, 0.5)
-        combined_factor = round(grade_factor * size_factor, 2)
+        # 8. Sizing dynamique — grade × news factor × Kelly × volume de base
+        grade_factor = {"A+": config.VOLUME_A_PLUS, "A": config.VOLUME_A, "B": config.VOLUME_B}.get(sig.grade, 0.5)
+
+        # Kelly Criterion (demi-Kelly cappé entre 10%-30%)
+        kelly_factor = 1.0
+        try:
+            history = load_history(days=60)
+            kelly_data = compute_kelly(history)
+            kelly_factor = kelly_data["kelly"]  # 1.0 si données insuffisantes
+            if kelly_data.get("win_rate") is not None:
+                log.info(
+                    f"  [KELLY] {kelly_data['note']} | "
+                    f"WR={kelly_data['win_rate']:.0%} PF={kelly_data.get('profit_factor','N/A')}"
+                )
+        except Exception:
+            kelly_factor = 1.0
+
+        kronos_mult = self._kronos_mult
+        combined_factor = round(grade_factor * size_factor * kelly_factor * kronos_mult, 2)
         self._current_volume = round(config.VOLUME * combined_factor, 3)
+        self._current_volume = max(config.MIN_VOLUME, min(config.MAX_VOLUME, self._current_volume))
         log.info(
             f"  [SIZING] Grade={sig.grade} ({grade_factor:.2f}x) × News({size_factor:.2f}x) "
+            f"× Kelly({kelly_factor:.2f}x) × Kronos({kronos_mult:.2f}x) "
             f"= {combined_factor:.2f}x → volume={self._current_volume} lots"
         )
+
+        # Mémoriser grade + kill zone pour le trade recording
+        self._current_grade     = sig.grade
+        self._current_kill_zone = sig.kill_zone or ""
 
         # Mémoriser le type de signal avant exécution
         self._last_signal_type = sig.h1_signal

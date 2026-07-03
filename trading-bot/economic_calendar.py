@@ -9,6 +9,8 @@ import time
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field
 
+from kronos_model import _is_us_market_holiday
+
 log = logging.getLogger("xtb_pw")
 
 # ── Événements récurrents (patterns mensuels) ────────────────────────────────
@@ -189,13 +191,24 @@ class EconomicCalendarEngine:
         blackouts = []
 
         # NFP : Vendredi 12h00–14h30 UTC, 1er-7e jour du mois
-        if weekday == 4 and 1 <= day <= 7 and 12 <= hour <= 14:
+        # Décalé au jeudi si ce vendredi est un jour férié NYSE observé
+        if weekday == 4 and 1 <= day <= 7 and 12 <= hour <= 14 and not _is_us_market_holiday(now.date()):
             blackouts.append(EconomicEvent(
                 name="NFP",
                 description="Non-Farm Payrolls — HAUTE VOLATILITE",
                 impact="CRITIQUE",
                 detected_from="time_pattern",
             ))
+        # NFP décalé : jeudi si le vendredi ≤7 est férié NYSE
+        if weekday == 3 and 1 <= day <= 7 and 12 <= hour <= 14:
+            next_day = now.date() + timedelta(days=1)
+            if next_day.day <= 7 and _is_us_market_holiday(next_day):
+                blackouts.append(EconomicEvent(
+                    name="NFP",
+                    description="Non-Farm Payrolls (avancé — vendredi férié) — HAUTE VOLATILITE",
+                    impact="CRITIQUE",
+                    detected_from="time_pattern",
+                ))
 
         # CPI : Mardi 12h00–13h30 UTC, 8e-15e jour du mois
         if weekday == 1 and 8 <= day <= 15 and 12 <= hour <= 13:

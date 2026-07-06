@@ -41,6 +41,9 @@ import config
 from strategy_pro import load_mtf, generate_pro_signal, print_pro_signal
 from market_intelligence import MarketIntelligenceEngine
 from news_surveillance import NewsSurveillanceEngine
+from smart_money import SmartMoneyEngine as _SmartMoneyEngine
+
+_smart_money_engine = _SmartMoneyEngine()
 from jesse_adapter import get_market_regime, get_var_estimate, validate_sl_with_monte_carlo, JESSE_MCP_AVAILABLE
 from trading_library import full_library_assessment, SteenbargerPerformanceTracker
 from pro_routines import run_pro_routine, score_key_levels
@@ -496,6 +499,13 @@ def run_scan():
         mi_result = asyncio.run(mi.analyze())
         if mi_result and mi_result.risk_score <= -0.3:
             log.info(f"  [SURVEILLANCE] RISK_OFF (score={mi_result.risk_score:.2f}) — prudence")
+    except Exception:
+        pass
+
+    # Smart Money — SEC EDGAR Form 4 + OpenInsider + Congress (non-bloquant)
+    try:
+        sm = _smart_money_engine.assess()
+        _smart_money_engine.log_signal(sm)
     except Exception:
         pass
 

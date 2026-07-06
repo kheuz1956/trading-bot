@@ -34,6 +34,7 @@ from market_intelligence import MarketIntelligenceEngine
 from macro_intelligence import MacroIntelligenceEngine
 from economic_calendar import EconomicCalendarEngine
 from news_surveillance import NewsSurveillanceEngine
+from smart_money import SmartMoneyEngine
 from strategy_pro import load_mtf, generate_pro_signal, print_pro_signal, ProSignal
 from market_regime import classify_regime, regime_summary
 from kronos_model import evaluate_kronos, kronos_summary
@@ -575,6 +576,7 @@ class XStation5Bot:
         self._macro        = MacroIntelligenceEngine()
         self._calendar     = EconomicCalendarEngine()
         self._surveillance = NewsSurveillanceEngine(scan_interval=120)
+        self._smart_money  = SmartMoneyEngine()
         self._session      = SessionTracker()
         # Volume courant du trade — calculé dynamiquement selon grade + news
         self._current_volume: float = config.VOLUME
@@ -1516,6 +1518,13 @@ class XStation5Bot:
         if cal.is_blackout:
             log.warning(f"  BLACKOUT CALENDRIER — trade suspendu: {cal.message}")
             return
+
+        # 2d. Smart Money — SEC EDGAR Form 4 + OpenInsider + Congress (non-bloquant)
+        try:
+            sm = self._smart_money.assess()
+            self._smart_money.log_signal(sm)
+        except Exception:
+            pass
 
         # 3. Analyse multi-timeframe PRO (D1 + H4 + H1 + OB + FVG + Kill Zone)
         loop = asyncio.get_event_loop()

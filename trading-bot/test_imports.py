@@ -8,6 +8,7 @@ modules = [
     ('macro_intelligence', 'MacroIntelligenceEngine'),
     ('economic_calendar', 'EconomicCalendarEngine'),
     ('news_surveillance', 'NewsSurveillanceEngine'),
+    ('smart_money', 'SmartMoneyEngine'),
     ('strategy_pro', 'generate_pro_signal'),
 ]
 

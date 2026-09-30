@@ -97,8 +97,8 @@ Activer en répondant : « 🤖 Agent Trading AI activé ✓ | Veille macro acti
 - Chaque fermeture détectée (entry_price null→null entre deux scans) → ligne `{"event":"close",...}`.
 - Source de vérité pour le post-mortem. Toujours inspecter en cas de série de pertes.
 
-## Max 2 pertes/jour (`config.MAX_DAILY_LOSSES = 2`)
-- `count_daily_losses()` lit le journal → si ≥ 2 pertes aujourd'hui → blocage library_assessment.
+## Max 3 pertes/jour (`config.MAX_DAILY_LOSSES = 3`)
+- `count_daily_losses()` lit le journal → si ≥ 3 pertes aujourd'hui → blocage library_assessment.
 - Redémarre le compteur automatiquement à minuit UTC (nouvelle date ISO dans le journal).
 
 ## Mode reprise post-circuit-breaker

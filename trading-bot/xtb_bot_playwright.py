@@ -9,6 +9,7 @@ Lancer      : python xtb_bot_playwright.py
 import asyncio
 import json
 import logging
+import msvcrt
 import os
 import subprocess
 import sys
@@ -218,25 +219,35 @@ def calc_levels(signal: str, snap: dict) -> dict:
 
 
 def get_ohlcv() -> pd.DataFrame:
-    """NQ=F = NASDAQ 100 E-mini futures, proxy fidèle du US100 XTB."""
-    raw = yf.download("NQ=F", period="10d", interval="1h",
-                      progress=False, auto_adjust=True)
-    if raw.empty:
-        raise RuntimeError("yfinance: aucune donnée reçue pour NQ=F")
-    # Aplatir le MultiIndex si présent (yfinance >= 0.2.x)
-    if isinstance(raw.columns, pd.MultiIndex):
-        raw.columns = raw.columns.get_level_values(0)
-    # Reconstruire un DataFrame propre avec des Series strictement 1D
-    idx = raw.index.get_level_values(0) if isinstance(raw.index, pd.MultiIndex) else raw.index
-    df = pd.DataFrame({
-        "Open":   raw["Open"].to_numpy().ravel(),
-        "High":   raw["High"].to_numpy().ravel(),
-        "Low":    raw["Low"].to_numpy().ravel(),
-        "Close":  raw["Close"].to_numpy().ravel(),
-        "Volume": raw["Volume"].to_numpy().ravel(),
-    }, index=idx)
-    log.info(f"  {len(df)} bougies H1 chargées (NQ=F)")
-    return df
+    """Charge les données H1 US100 via yfinance — NQZ26=F (déc.) puis NQ=F puis ^NDX en fallback."""
+    _tickers = ["NQZ26=F", "NQ=F", "^NDX", "QQQ"]
+    for _sym in _tickers:
+        try:
+            raw = yf.download(_sym, period="10d", interval="1h",
+                              progress=False, auto_adjust=True)
+            if raw.empty:
+                continue
+            if isinstance(raw.columns, pd.MultiIndex):
+                raw.columns = raw.columns.get_level_values(0)
+            idx = raw.index.get_level_values(0) if isinstance(raw.index, pd.MultiIndex) else raw.index
+            df = pd.DataFrame({
+                "Open":   raw["Open"].to_numpy().ravel(),
+                "High":   raw["High"].to_numpy().ravel(),
+                "Low":    raw["Low"].to_numpy().ravel(),
+                "Close":  raw["Close"].to_numpy().ravel(),
+                "Volume": raw["Volume"].to_numpy().ravel(),
+            }, index=idx)
+            # Rejeter si le dernier Close < 10000 (futures expirés ou données corrompues)
+            last_close = float(df["Close"].iloc[-1])
+            if last_close < 10000:
+                log.warning(f"  {_sym}: dernier Close {last_close:.0f} suspect — ticker suivant")
+                continue
+            log.info(f"  {len(df)} bougies H1 chargées ({_sym})")
+            return df
+        except Exception as e:
+            log.debug(f"  {_sym} échec: {e}")
+            continue
+    raise RuntimeError("yfinance: aucune donnée valide pour US100 (NQZ26=F / NQ=F / ^NDX / QQQ)")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -244,6 +255,14 @@ def get_ohlcv() -> pd.DataFrame:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 STATE_FILE = Path(__file__).parent / "bot_state.json"
+
+
+def _redact_url(url: str) -> str:
+    """Masque les identifiants (xslogin/xspass/password) dans une URL avant log."""
+    import re as _re
+    if not url:
+        return url
+    return _re.sub(r"(xslogin|xspass|password|login|pass)=[^&\s]*", r"\1=***", url, flags=_re.I)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -349,6 +368,11 @@ class CdpPage:
     async def evaluate(self, expression: str):
         if not self._ws or self._ws.closed:
             raise RuntimeError("CDP WebSocket not connected")
+        # Sémantique Playwright : une fonction passée en expression doit être APPELÉE.
+        # Runtime.evaluate brut renvoie sinon l'objet fonction sérialisé en {} sans l'exécuter.
+        stripped = expression.lstrip()
+        if stripped.startswith(("() =>", "()=>", "async () =>", "async ()=>", "function")):
+            expression = f"({expression})()"
         self._msg_id += 1
         req_id = self._msg_id
         await self._ws.send_str(json.dumps({
@@ -367,6 +391,30 @@ class CdpPage:
                 raise RuntimeError(f"CDP JS: {exc.get('text','error')}")
             val = result.get("result", {})
             return val.get("value")
+
+    async def ping(self, timeout: float = 5.0) -> bool:
+        """CDP Watchdog — retourne True si le WebSocket répond en moins de timeout secondes."""
+        if not self._ws or self._ws.closed:
+            return False
+        try:
+            self._msg_id += 1
+            req_id = self._msg_id
+            await self._ws.send_str(json.dumps({
+                "id": req_id, "method": "Runtime.evaluate",
+                "params": {"expression": "1", "returnByValue": True},
+            }))
+            deadline = asyncio.get_event_loop().time() + timeout
+            while asyncio.get_event_loop().time() < deadline:
+                try:
+                    raw  = await asyncio.wait_for(self._ws.receive_str(), timeout=timeout)
+                    data = json.loads(raw)
+                    if data.get("id") == req_id:
+                        return True
+                except asyncio.TimeoutError:
+                    return False
+            return False
+        except Exception:
+            return False
 
     async def screenshot(self, path: str = None):
         pass  # debug screenshots disabled in CDP mode
@@ -587,6 +635,17 @@ class XStation5Bot:
         self._circuit_breaker_until: float = 0.0   # timestamp unix
         # Cooldown après clôture de position
         self._cooldown_until: float        = 0.0   # timestamp unix
+        # SL initial du trade courant (R-multiple journal)
+        self._initial_sl: float | None     = None
+        # Take profit — TP1 réel + extrême favorable pour le profit-lock ratchet
+        self._tp1_price: float | None      = None
+        self._tp2_price: float | None      = None
+        self._peak_price: float | None     = None
+        # Confirmation d'attache SL/TP côté serveur — retry persistant tant que False
+        self._sltp_confirmed: bool         = False
+        self._sltp_last_retry: float       = 0.0
+        # Throttle de la resynchronisation serveur du trail stop (profit-lock)
+        self._last_sl_sync: float          = 0.0
         # Timestamp de placement de l'ordre courant (fallback position check)
         self._order_placed_at: float       = 0.0
         # Compteur journalier (persiste entre redémarrages, reset à minuit UTC)
@@ -601,6 +660,12 @@ class XStation5Bot:
         self._current_kill_zone: str       = ""
         # KRONOS — multiplicateur de sizing temporel
         self._kronos_mult: float           = 1.0
+        # Fermeture précédente — signalés à signal_runner via bot_state.json
+        self._last_close_reason: str | None = None
+        self._last_pnl: float               = 0.0
+        self._last_close_price: float | None = None
+        # Pertes journalières réelles (ne se remet PAS à zéro après un gain, contrairement à consecutive_losses)
+        self._daily_losses: int             = 0
 
     def _save_state(self):
         """Persiste l'état du trade en cours + dernier trade clôturé sur disque."""
@@ -623,8 +688,16 @@ class XStation5Bot:
             "daily_trade_count":  self._daily_trade_count,
             "trade_date":         self._trade_date,
             "cooldown_until":     self._cooldown_until,
-            "daily_losses":       self._consecutive_losses,
+            "daily_losses":       self._daily_losses,
             "sl":                 self._trail_stop,  # SL courant (initial ou trail)
+            "initial_sl":         self._initial_sl,
+            "tp1_price":          self._tp1_price,
+            "tp2_price":          self._tp2_price,
+            "peak_price":         self._peak_price,
+            "sltp_confirmed":     self._sltp_confirmed,
+            "last_close_reason":  self._last_close_reason,
+            "last_pnl":           self._last_pnl,
+            "last_close_price":   self._last_close_price,
         }), encoding="utf-8")
 
     def _load_state(self):
@@ -642,13 +715,20 @@ class XStation5Bot:
                 self._current_volume      = data.get("current_volume", config.VOLUME)
                 self._order_placed_at     = data.get("order_placed_at", 0.0)
                 self._cooldown_until      = data.get("cooldown_until", 0.0)
+                self._initial_sl          = data.get("initial_sl")
+                self._tp1_price           = data.get("tp1_price")
+                self._tp2_price           = data.get("tp2_price")
+                self._peak_price          = data.get("peak_price")
+                self._sltp_confirmed      = data.get("sltp_confirmed", False)
                 saved_date                = data.get("trade_date", "")
                 today_utc                 = datetime.now(timezone.utc).strftime("%Y-%m-%d")
                 if saved_date == today_utc:
                     self._daily_trade_count = data.get("daily_trade_count", 0)
+                    self._daily_losses      = data.get("daily_losses", 0)
                     self._trade_date        = saved_date
                 else:
                     self._daily_trade_count = 0
+                    self._daily_losses      = 0
                     self._trade_date        = today_utc
                     log.info(f"Nouveau jour UTC ({today_utc}) — compteur journalier remis à zéro")
                 log.info(
@@ -683,7 +763,7 @@ class XStation5Bot:
                 await cdp_page.connect()
                 self._page     = cdp_page
                 self._cdp_sess = sess
-                log.info(f"CDP WebSocket connecté — XStation5 loggedIn: {xtb_tab['url'][:60]}")
+                log.info(f"CDP WebSocket connecté — XStation5 loggedIn: {_redact_url(xtb_tab['url'])[:60]}")
                 return
             else:
                 await sess.close()
@@ -735,30 +815,96 @@ class XStation5Bot:
                 await self._browser.close()
         except Exception:
             pass
+        try:
+            if self._cdp_sess and not self._cdp_sess.closed:
+                await self._cdp_sess.close()
+        except Exception:
+            pass
+        self._cdp_sess = None
 
         _chrome_paths = [
             r"C:\Program Files\Google\Chrome\Application\chrome.exe",
             r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
         ]
 
+        profile_dir = str(Path(__file__).parent / ".playwright_profile")
+
         for attempt in range(3):
+            # Méthode A : CDP direct (CdpPage) — utilisée quand Playwright n'est pas disponible
             try:
-                self._browser = await self._pw.chromium.connect_over_cdp("http://localhost:9222")
-                contexts = self._browser.contexts
-                pages = contexts[0].pages if contexts else []
-                xtb_page = next((p for p in pages if "xstation5" in p.url), None)
-                if xtb_page:
-                    self._page = xtb_page
-                    log.info(f"  Reconnecté (tentative {attempt+1}) — onglet xStation5 trouvé")
-                    return True
-                self._page = await (contexts[0].new_page() if contexts else self._browser.new_page())
-                await self._page.goto(self.LOGIN_URL, timeout=30000)
-                await asyncio.sleep(5)
-                log.info(f"  Reconnecté (tentative {attempt+1}) — navigation vers xStation5")
+                sess = aiohttp.ClientSession()
+                async with sess.get("http://localhost:9222/json/list",
+                                    timeout=aiohttp.ClientTimeout(total=4)) as r:
+                    tabs = await r.json(content_type=None)
+                xstb_tabs = [t for t in tabs if "xstation5" in t.get("url", "") and t.get("type") == "page"]
+
+                # Purge des onglets XStation5 en trop — sans ça, chaque appel de
+                # reconnexion (déclenché par le watchdog à chaque tick en échec)
+                # empile un nouvel onglet sans jamais fermer les précédents.
+                # Vu en prod : 416 puis 43 onglets accumulés, alourdissant Chrome
+                # jusqu'à l'instabilité (cercle vicieux crash -> reconnect -> tab).
+                if len(xstb_tabs) > 1:
+                    for extra in xstb_tabs[1:]:
+                        try:
+                            await sess.get(f"http://localhost:9222/json/close/{extra['id']}",
+                                          timeout=aiohttp.ClientTimeout(total=3))
+                        except Exception:
+                            pass
+                    log.info(f"  {len(xstb_tabs)-1} onglet(s) XStation5 en trop fermé(s)")
+                xtb_tab = xstb_tabs[0] if xstb_tabs else None
+
+                if not xtb_tab:
+                    # Aucun onglet XStation5 — en créer un
+                    async with sess.get(f"http://localhost:9222/json/new?{self.LOGIN_URL}",
+                                        timeout=aiohttp.ClientTimeout(total=4)) as r2:
+                        xtb_tab = await r2.json(content_type=None)
+                    await asyncio.sleep(5)
+                cdp_page = CdpPage(xtb_tab, sess)
+                await cdp_page.connect()
+                self._page     = cdp_page
+                self._cdp_sess = sess
+                log.info(f"  Reconnecté CDP (tentative {attempt+1}) — {_redact_url(xtb_tab.get('url',''))[:60]}")
                 return True
-            except Exception as e:
-                log.warning(f"  CDP indisponible (tentative {attempt+1}/3): {e}")
-                if attempt < 2:
+            except Exception as e_cdp:
+                try:
+                    await sess.close()
+                except Exception:
+                    pass
+
+            # Méthode B : Playwright connect_over_cdp (si Playwright disponible)
+            if self._pw is not None:
+                try:
+                    self._browser = await self._pw.chromium.connect_over_cdp("http://localhost:9222")
+                    contexts = self._browser.contexts
+                    pages = contexts[0].pages if contexts else []
+                    xtb_page = next((p for p in pages if "xstation5" in p.url), None)
+                    if xtb_page:
+                        self._page = xtb_page
+                        log.info(f"  Reconnecté Playwright (tentative {attempt+1}) — xStation5 trouvé")
+                        return True
+                    self._page = await (contexts[0].new_page() if contexts else self._browser.new_page())
+                    await self._page.goto(self.LOGIN_URL, timeout=30000)
+                    await asyncio.sleep(5)
+                    log.info(f"  Reconnecté Playwright (tentative {attempt+1}) — navigation xStation5")
+                    return True
+                except Exception as e_pw:
+                    log.warning(f"  CDP indisponible (tentative {attempt+1}/3): {e_pw}")
+
+            if attempt < 2:
+                # Ne relancer Chrome que s'il n'écoute vraiment plus sur 9222 —
+                # sinon le superviseur externe (supervisor.ps1, qui fait la même
+                # vérification indépendamment) et cette boucle finissent par
+                # lancer plusieurs Chrome en parallèle sur le même profil.
+                _cdp_up = False
+                try:
+                    async with aiohttp.ClientSession() as _probe:
+                        async with _probe.get("http://localhost:9222/json/version",
+                                             timeout=aiohttp.ClientTimeout(total=3)) as _r:
+                            _cdp_up = _r.status == 200
+                except Exception:
+                    _cdp_up = False
+
+                if not _cdp_up:
                     for chrome_path in _chrome_paths:
                         if os.path.exists(chrome_path):
                             subprocess.Popen([
@@ -766,11 +912,13 @@ class XStation5Bot:
                                 "--remote-debugging-port=9222",
                                 "--no-first-run",
                                 "--no-default-browser-check",
-                                self.LOGIN_URL,
+                                f"--user-data-dir={profile_dir}",
                             ])
                             log.info(f"  Chrome relancé: {chrome_path}")
                             break
-                    await asyncio.sleep(10)
+                else:
+                    log.info("  CDP déjà actif — pas de relance Chrome, retry connexion")
+                await asyncio.sleep(12)
 
         log.error("Reconnexion impossible après 3 tentatives")
         return False
@@ -809,12 +957,18 @@ class XStation5Bot:
                 log.info("Session déjà active (détecté tard) — login ignoré")
                 return
             await p.screenshot(path="login_timeout.png")
-            log.error(f"Formulaire introuvable (URL: {p.url})")
+            log.error(f"Formulaire introuvable (URL: {_redact_url(p.url)})")
             raise
 
-        await id_input.fill(config.ACCOUNT_ID)
+        # Sélecteurs spécifiques XStation5 (name="xslogin" / name="xspass")
+        id_input_specific = p.locator('input[name="xslogin"]').first
+        try:
+            await id_input_specific.wait_for(state="visible", timeout=3000)
+            await id_input_specific.fill(config.ACCOUNT_ID)
+        except Exception:
+            await id_input.fill(config.ACCOUNT_ID)
 
-        pass_input = p.locator('input[type="password"]').first
+        pass_input = p.locator('input[name="xspass"], input[type="password"]').first
         await pass_input.wait_for(state="visible", timeout=10000)
         await pass_input.fill(config.PASSWORD)
         await asyncio.sleep(0.3)
@@ -823,8 +977,11 @@ class XStation5Bot:
         await asyncio.sleep(3.0)
 
         # Stratégie 1 : clic bouton submit
-        submitted = await p.evaluate("""() => {
+        # XStation5 utilise input[type="button"][value="Login"], pas <button>
+        submitted = await p.evaluate("""(() => {
             const selectors = [
+                'input[type="button"]',
+                'input[type="submit"]',
                 'button[type="submit"]',
                 'button.login-btn',
                 'button.btn-primary',
@@ -834,11 +991,11 @@ class XStation5Bot:
                 const btn = document.querySelector(sel);
                 if (btn && btn.offsetParent !== null) {
                     btn.click();
-                    return btn.innerText.trim().slice(0, 30) || 'submit-clicked';
+                    return (btn.value || btn.innerText || '').trim().slice(0, 30) || 'submit-clicked';
                 }
             }
             return null;
-        }""")
+        })()""")
         log.info(f"  Bouton login cliqué: '{submitted}'")
 
         # Stratégie 2 : Enter via CDP Input.dispatchKeyEvent (Zone.js-compatible)
@@ -861,6 +1018,15 @@ class XStation5Bot:
         try:
             await p.wait_for_url("**/loggedIn**", timeout=15000)
             log.info("Login XStation5 OK")
+            # Sécurité : XStation5 laisse xslogin/xspass dans la query string.
+            # Réécrire l'URL (history.replaceState) pour purger les identifiants.
+            try:
+                await p.evaluate(
+                    "(() => { try { history.replaceState(null,'',"
+                    "location.pathname + location.hash); } catch(e){} })()"
+                )
+            except Exception:
+                pass
         except PWTimeout:
             # Détecter la dialog de code de vérification (2FA email)
             twofa_dialog = p.locator('input[placeholder*="code" i], input[placeholder*="vérif" i], .verification-code input, input[type="text"][maxlength]').first
@@ -886,7 +1052,7 @@ class XStation5Bot:
                 raise RuntimeError("Timeout 2FA — code non fourni dans 5 minutes")
             except Exception as e2:
                 await p.screenshot(path="login_timeout.png")
-                log.error(f"Login échoué (URL: {p.url}) — {e2}")
+                log.error(f"Login échoué (URL: {_redact_url(p.url)}) — {e2}")
                 raise
 
     # ── Navigation ────────────────────────────────────────────────────────────
@@ -900,9 +1066,34 @@ class XStation5Bot:
             await asyncio.sleep(0.5)
         except PWTimeout:
             log.warning("US100 non trouvé dans market watch — tentative de recherche")
-            await p.fill('input[placeholder*="Rechercher" i]', "US100")
-            await asyncio.sleep(1)
-            await p.click('text=US100 CFD', timeout=5000)
+            # Try multiple search input selectors (xStation5 lang may vary)
+            for search_sel in [
+                'input[placeholder*="Rechercher" i]',
+                'input[placeholder*="Search" i]',
+                'input[placeholder*="Szukaj" i]',
+                'input[type="search"]',
+            ]:
+                try:
+                    await p.fill(search_sel, "US100", timeout=2000)
+                    break
+                except PWTimeout:
+                    continue
+            await asyncio.sleep(1.5)
+            # Try multiple selectors for US100 in search results
+            for click_sel in [
+                'text=US100 CFD',
+                'text=US100',
+                '[data-test*="US100"]',
+                '.instrument-name:has-text("US100")',
+                'span:has-text("US100 CFD")',
+            ]:
+                try:
+                    await p.click(click_sel, timeout=3000)
+                    log.info(f"US100 sélectionné via sélecteur: {click_sel}")
+                    return
+                except PWTimeout:
+                    continue
+            raise PWTimeout("US100 non trouvé avec aucun sélecteur après recherche")
 
     # ── Placement d'ordre (Click & Trade) ────────────────────────────────────
 
@@ -913,8 +1104,12 @@ class XStation5Bot:
         await stepper_input.press("Tab")
         await asyncio.sleep(0.2)
 
-    async def _configure_sl_tp(self, sl: float, tp: float):
-        """Configure SL/TP via le popup XStation5 Click & Trade."""
+    async def _configure_sl_tp(self, sl: float, tp: float, entry: float | None = None):
+        """Configure SL/TP via le popup XStation5 Click & Trade.
+
+        Les steppers du popup attendent des DISTANCES en points par rapport au prix
+        d'entrée, pas des prix absolus. Si entry est fourni, convertir.
+        """
         p = self._page
         # Déclencher mouseOver Angular sur la row du bouton SELL visible via JS
         await p.evaluate("""() => {
@@ -937,9 +1132,13 @@ class XStation5Bot:
             raise RuntimeError("Bouton sl-tp-button introuvable dans le DOM")
         await asyncio.sleep(0.5)
 
-        # Remplir S/L et T/P via Angular (dispatch events)
-        sl_val  = round(sl, 2)
-        tp_val  = round(tp, 2)
+        # Remplir S/L et T/P via Angular (dispatch events) — distances en points
+        if entry is not None:
+            sl_val = round(abs(entry - sl), 1)
+            tp_val = round(abs(tp - entry), 1)
+        else:
+            sl_val = round(sl, 2)
+            tp_val = round(tp, 2)
         await p.evaluate(f"""() => {{
             const inputs = Array.from(document.querySelectorAll('input[name="stepperInput"]'))
                 .filter(i => parseFloat(i.value) === 0 || i.value === '');
@@ -1015,7 +1214,17 @@ class XStation5Bot:
                     });
                 if (textClose) { textClose.click(); return 'text-fermer'; }
 
-                // Stratégie 5 : dump des boutons visibles pour diagnostic
+                // Stratégie 5 : dropdown-toggle (pattern XStation5 réel)
+                // Le bouton ⋮ ou "btn-primary dropdown-toggle" ouvre un menu avec "Close"
+                const dropdowns = Array.from(document.querySelectorAll(
+                    'button[class*="dropdown-toggle"], button.dropdown-toggle, [class*="more-btn"], button[class*="menu-btn"]'
+                )).filter(b => b.offsetParent !== null);
+                if (dropdowns.length) {
+                    dropdowns[dropdowns.length - 1].click();
+                    return '__DROPDOWN_CLICKED';
+                }
+
+                // Stratégie 6 : dump des boutons visibles pour diagnostic
                 const visible = Array.from(document.querySelectorAll('button'))
                     .filter(b => b.offsetParent !== null)
                     .map(b => b.className + '|' + b.innerText.trim().slice(0,20))
@@ -1023,7 +1232,34 @@ class XStation5Bot:
                 return '__BUTTONS:' + visible;
             }""")
 
-            if closed and not str(closed).startswith('__BUTTONS:'):
+            if closed == '__DROPDOWN_CLICKED':
+                # Attendre que le menu dropdown s'ouvre, puis cliquer Close/Fermer
+                await asyncio.sleep(0.6)
+                try:
+                    dropdown_result = await p.evaluate("""() => {
+                        const items = Array.from(document.querySelectorAll(
+                            '.dropdown-menu a, .dropdown-menu button, .dropdown-item, [class*="dropdown"] li, [class*="context-menu"] li'
+                        )).filter(el => el.offsetParent !== null);
+                        const closeItem = items.find(el => {
+                            const t = el.innerText.trim().toLowerCase();
+                            return t.includes('close') || t.includes('fermer') || t.includes('clore');
+                        });
+                        if (closeItem) { closeItem.click(); return 'dropdown-close'; }
+                        // Fallback : tout élément visible du dropdown
+                        const allItems = items.map(el => el.innerText.trim().slice(0,20)).join(' | ');
+                        return '__DROPDOWN_ITEMS:' + allItems;
+                    }""")
+                    if dropdown_result and not str(dropdown_result).startswith('__DROPDOWN_ITEMS:'):
+                        log.info(f"  Position fermée via dropdown XStation5 ({dropdown_result})")
+                        closed = dropdown_result
+                    else:
+                        log.warning(f"  Dropdown ouvert mais Close non trouvé. Items: {dropdown_result}")
+                        closed = None
+                except Exception as e:
+                    log.warning(f"  Erreur lecture dropdown: {e}")
+                    closed = None
+
+            if closed and not str(closed).startswith('__BUTTONS:') and closed != '__DROPDOWN_CLICKED':
                 log.info(f"  Position fermée via XStation5 (selector: {closed})")
                 await asyncio.sleep(1.5)
                 # Confirmer si popup
@@ -1036,7 +1272,7 @@ class XStation5Bot:
                     }""")
                 except Exception:
                     pass
-            else:
+            elif not closed or str(closed).startswith('__BUTTONS:'):
                 if closed and closed.startswith('__BUTTONS:'):
                     log.warning(f"  Close introuvable. Boutons visibles: {closed[10:]}")
                 else:
@@ -1069,6 +1305,21 @@ class XStation5Bot:
         try:
             await self.ensure_us100_active()
 
+            # SL/TP Click & Trade AVANT le clic — pré-attache stop et limite côté serveur.
+            # Le toggle se désactive à chaque refresh de session : le reconfigurer à chaque ordre.
+            sl_tp_attached = False
+            for attempt in range(2):
+                try:
+                    await self._configure_sl_tp(levels["sl"], levels["tp2"], levels.get("entry"))
+                    sl_tp_attached = True
+                    break
+                except Exception as e:
+                    if attempt == 0:
+                        log.warning(f"  SL/TP pré-trade tentative 1 échouée ({e}) — retry dans 2s")
+                        await asyncio.sleep(2)
+                    else:
+                        log.warning(f"  SL/TP pré-trade non configuré ({e}) — SL software seul")
+
             # Cliquer SELL ou BUY via les sélecteurs réels XStation5
             if signal == "SHORT":
                 clicked = await p.evaluate("""() => {
@@ -1087,6 +1338,10 @@ class XStation5Bot:
                 }""")
                 log.info(f"  BUY cliqué @ {clicked}")
 
+            if not clicked or not isinstance(clicked, str):
+                log.error(f"  Bouton {signal} introuvable ou clic non exécuté (retour: {clicked!r}) — ordre annulé")
+                return False
+
             await asyncio.sleep(1.5)
 
             # Confirmer si une popup apparaît
@@ -1103,23 +1358,29 @@ class XStation5Bot:
             self._trade_side        = signal
             self._tp1_done          = False
             self._trail_stop        = levels.get("sl")  # SL initial comme trail_stop de départ
+            self._initial_sl        = levels.get("sl")  # figé pour le calcul du R-multiple
+            self._tp1_price         = levels.get("tp1")
+            self._tp2_price         = levels.get("tp2")
+            self._peak_price        = levels.get("entry")  # extrême favorable (profit-lock ratchet)
+            self._sltp_confirmed    = sl_tp_attached
+            self._sltp_last_retry   = time.time()
             self._order_placed_at   = time.time()
             self._trade_date        = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             self._daily_trade_count += 1
             self._save_state()
 
-            # Configurer SL/TP APRÈS l'ordre (panel positions ouvertes + pré-trade)
-            await asyncio.sleep(1.0)
-            for attempt in range(2):
+            # Filet post-ordre : si le pré-attachement a échoué, retenter après l'ordre
+            if not sl_tp_attached:
+                await asyncio.sleep(1.0)
                 try:
-                    await self._configure_sl_tp(levels["sl"], levels["tp2"])
-                    break
-                except Exception as e:
-                    if attempt == 0:
-                        log.warning(f"SL/TP tentative 1 échouée ({e}) — retry dans 2s")
-                        await asyncio.sleep(2)
-                    else:
-                        log.warning(f"SL/TP non configuré dans XStation5 — SL software actif @ {levels['sl']}")
+                    await self._configure_sl_tp(levels["sl"], levels["tp2"], levels.get("entry"))
+                    self._sltp_confirmed = True
+                    self._save_state()
+                except Exception:
+                    log.warning(
+                        f"SL/TP non configuré dans XStation5 — SL/TP software actif @ "
+                        f"SL={levels['sl']} TP={levels.get('tp1')} — retry persistant à chaque scan"
+                    )
 
             log.info(
                 f"  Ordre placé: {signal} @ {levels['entry']} | "
@@ -1170,28 +1431,66 @@ class XStation5Bot:
                 self._tp1_done   = True
                 self._trail_stop = self._entry_price   # SL = entry (breakeven)
                 self._save_state()
+                await self._sync_server_sl()
         else:
-            # Trailing stop actif — ajuster si le prix avance favorablement
+            # Suivi de l'extrême favorable (profit-lock ratchet)
+            if self._peak_price is None:
+                self._peak_price = current_price
+            elif self._trade_side == "LONG" and current_price > self._peak_price:
+                self._peak_price = current_price
+            elif self._trade_side == "SHORT" and current_price < self._peak_price:
+                self._peak_price = current_price
+
+            # Profit-lock : verrouiller PROFIT_LOCK_RATIO du profit max atteint
+            # (remplace le simple breakeven — un trade à +60 ne peut plus finir à 0)
+            lock = config.PROFIT_LOCK_RATIO
+            if self._trade_side == "LONG":
+                lock_level = round(self._entry_price + lock * (self._peak_price - self._entry_price), 2)
+            else:
+                lock_level = round(self._entry_price - lock * (self._entry_price - self._peak_price), 2)
+
+            candidates = [lock_level]
             if atr > 0:
                 trail_dist = atr * config.TRAILING_ATR_MULT
-                if self._trade_side == "LONG":
-                    new_trail = round(current_price - trail_dist, 2)
-                    if self._trail_stop is None or new_trail > self._trail_stop:
-                        log.info(
-                            f"  Trailing stop LONG: {self._trail_stop} → {new_trail} "
-                            f"(prix={current_price:.2f}, dist={trail_dist:.0f}pts)"
-                        )
-                        self._trail_stop = new_trail
-                        self._save_state()
-                else:  # SHORT
-                    new_trail = round(current_price + trail_dist, 2)
-                    if self._trail_stop is None or new_trail < self._trail_stop:
-                        log.info(
-                            f"  Trailing stop SHORT: {self._trail_stop} → {new_trail} "
-                            f"(prix={current_price:.2f}, dist={trail_dist:.0f}pts)"
-                        )
-                        self._trail_stop = new_trail
-                        self._save_state()
+                candidates.append(round(current_price - trail_dist, 2) if self._trade_side == "LONG"
+                                  else round(current_price + trail_dist, 2))
+
+            new_trail = max(candidates) if self._trade_side == "LONG" else min(candidates)
+            improved = (self._trail_stop is None
+                        or (self._trade_side == "LONG" and new_trail > self._trail_stop)
+                        or (self._trade_side == "SHORT" and new_trail < self._trail_stop))
+            if improved:
+                log.info(
+                    f"  Trail relevé {self._trade_side}: {self._trail_stop} → {new_trail} "
+                    f"(prix={current_price:.2f}, peak={self._peak_price:.2f}, lock={lock_level})"
+                )
+                self._trail_stop = new_trail
+                self._save_state()
+                await self._sync_server_sl()
+
+    async def _sync_server_sl(self):
+        """Pousse le trail_stop courant vers le SL serveur XTB.
+
+        Sans ça, le SL/TP attaché à l'ouverture reste figé au niveau initial
+        pendant toute la vie du trade : le profit-lock ne protège alors QUE
+        tant que le bot tourne. Un gel du process pendant que le trail est
+        resserré (breakeven, ratchet) expose le trade au SL ORIGINAL, bien
+        plus large — c'est très probablement la cause de la perte de -218 pts
+        du 20-21/07 (gel de 10h avec un trail resserré jamais remonté au serveur).
+
+        Throttlé à 20s pour éviter de marteler le popup Click & Trade.
+        """
+        if not self._entry_price or not self._trail_stop or not self._tp2_price:
+            return
+        if time.time() - getattr(self, "_last_sl_sync", 0) < 20:
+            return
+        self._last_sl_sync = time.time()
+        try:
+            await self._configure_sl_tp(self._trail_stop, self._tp2_price, self._entry_price)
+            log.info(f"  [SL SYNC] Stop serveur resynchronisé à {self._trail_stop}")
+        except Exception as e:
+            log.warning(f"  [SL SYNC] Échec resynchronisation serveur ({e}) — "
+                       f"protection logicielle seule active pour ce niveau")
 
     # ── Lire le prix courant depuis la page ───────────────────────────────────
 
@@ -1208,14 +1507,30 @@ class XStation5Bot:
                 return float(price)
         except Exception:
             pass
-        # Fallback yfinance — toujours disponible même si CDP ne voit pas le prix
-        try:
-            import yfinance as yf, pandas as pd
-            df = yf.download("NQ=F", period="1d", interval="1m", progress=False, auto_adjust=True)
-            c = df["Close"].squeeze()
-            return float(c.iloc[-2])
-        except Exception:
-            return None
+        # Fallback yfinance — essayer NQZ26=F (décembre) puis NQ=F puis ^NDX
+        # Validation anti-corruption : rejeter tout prix déviant >15% du dernier prix connu
+        _ref = self._entry_price or getattr(self, "_last_known_price", None)
+        for _ticker in ("NQZ26=F", "NQ=F", "^NDX", "QQQ"):
+            try:
+                import yfinance as yf
+                df = yf.download(_ticker, period="1d", interval="1m", progress=False, auto_adjust=True)
+                if df.empty:
+                    continue
+                c = df["Close"].squeeze()
+                raw_price = float(c.iloc[-2])
+                if raw_price < 1000:
+                    continue
+                # Sanity check : rejeter si déviation > 15% du prix de référence
+                if _ref and abs(raw_price - _ref) / _ref > 0.15:
+                    log.warning(f"  Prix yfinance {_ticker} suspect: {raw_price:.0f} vs ref {_ref:.0f} "
+                                f"({abs(raw_price-_ref)/_ref*100:.0f}% écart) — ignoré")
+                    continue
+                if _ref:
+                    self._last_known_price = raw_price
+                return raw_price
+            except Exception:
+                continue
+        return None
 
     async def _has_open_position(self) -> bool:
         """
@@ -1225,13 +1540,40 @@ class XStation5Bot:
           1. Le prix ait clairement croisé le SL ou trail_stop (stop-out confirmé)
           2. L'ordre soit vieux de plus de 24h (position stale)
         """
-        # Garde-temps : ordre de moins de 5 min → toujours ouvert sans vérification
-        if self._order_placed_at and time.time() - self._order_placed_at < 300:
-            return True
+        # Garde-temps COURT (20 s) : juste après l'entrée, un prix DOM/yfinance
+        # stale peut être du mauvais côté. On saute alors uniquement le TP (éviter
+        # une fausse prise de profit), MAIS le SL dur et le profit-lock sont
+        # TOUJOURS honorés — bug du 17/07 : une grâce aveugle de 5 min a transformé
+        # un +29 verrouillé en -67 en ignorant le stop pendant toute la vie du scalp.
+        _fresh = self._order_placed_at and (time.time() - self._order_placed_at < 20)
 
         current = await self.get_current_price()
         if current is None:
             return True  # Pas de prix → bénéfice du doute
+
+        # Take profit réel — fermer 100% à TP1, le gain est encaissé.
+        # Exception régime TRENDING (Livermore) : laisser courir vers TP2 serveur,
+        # le profit-lock ratchet sécurise 60% du pic en chemin.
+        _riding_trend = getattr(self, "_current_regime", "") == "TRENDING"
+        if not _fresh and config.TP1_FULL_CLOSE and self._tp1_price and not _riding_trend:
+            tp_hit = (current <= self._tp1_price) if self._trade_side == "SHORT" \
+                     else (current >= self._tp1_price)
+            if tp_hit:
+                log.info(f"  TP1 touché: prix {current:.2f} vs TP1 {self._tp1_price:.2f} "
+                         f"— TAKE PROFIT, fermeture XStation5")
+                await self._close_position_in_xtb()
+                return False
+
+        # En mode trend-riding : TP2 logiciel (backup du TP2 serveur)
+        if not _fresh and _riding_trend and self._entry_price:
+            _tp2 = getattr(self, "_tp2_price", None)
+            if _tp2:
+                tp2_hit = (current <= _tp2) if self._trade_side == "SHORT" else (current >= _tp2)
+                if tp2_hit:
+                    log.info(f"  TP2 touché (trend-riding): prix {current:.2f} vs TP2 {_tp2:.2f} "
+                             f"— TAKE PROFIT, fermeture XStation5")
+                    await self._close_position_in_xtb()
+                    return False
 
         # Stop-out basé sur SL / trail_stop
         sl = self._trail_stop  # Mis à jour par manage_position après TP1
@@ -1310,9 +1652,12 @@ class XStation5Bot:
                     except Exception:
                         await self._reconnect_browser()
 
-            elapsed = time.monotonic() - t0
-            wait    = max(0, config.SCAN_INTERVAL_SEC - elapsed)
-            now     = datetime.now(timezone.utc).strftime("%H:%M GMT")
+            elapsed  = time.monotonic() - t0
+            # Tick rapide (5 s) quand une position est ouverte — réactivité SL/TP maximale
+            _interval = (getattr(config, "SCAN_INTERVAL_POSITION_SEC", config.SCAN_INTERVAL_SEC)
+                         if self._entry_price is not None else config.SCAN_INTERVAL_SEC)
+            wait     = max(0, _interval - elapsed)
+            now      = datetime.now(timezone.utc).strftime("%H:%M GMT")
             log.info(f"  ⏱  [{now}] Prochain scan dans {wait:.0f}s\n")
             await asyncio.sleep(wait)
 
@@ -1355,6 +1700,41 @@ class XStation5Bot:
             self._daily_trade_count = 0
             self._trade_date        = today_utc
             self._save_state()
+
+        # 0aa. SKILL 15 — CDP Watchdog : ping 5s au lieu de timeout 180s natif
+        if hasattr(self._page, "ping"):
+            _cdp_alive = await self._page.ping(timeout=5.0)
+            if not _cdp_alive:
+                log.warning("  [CDP WATCHDOG] WebSocket mort — reconnexion immédiate (évite attente 180s)")
+                reconnected = await self._reconnect_browser()
+                if reconnected:
+                    try:
+                        await self.login()
+                    except Exception:
+                        pass
+                return  # Skip ce tick, reprendre au prochain scan
+
+        # 0ab. INTEL BOARD — synthèse décisionnelle toutes les 10 min (cache SKILL 20).
+        # Uniquement à plat : les fetchers sont bloquants (urllib) et ne doivent pas
+        # retarder le tick 5 s de gestion de position.
+        if self._entry_price is None and time.time() - getattr(self, "_last_intel_board", 0) > 600:
+            self._last_intel_board = time.time()
+            try:
+                from market_intel_extra import (fetch_fear_greed, fetch_cot_nasdaq,
+                                                fetch_fedwatch, fetch_te_calendar,
+                                                fetch_financialjuice)
+                _fg, _cot, _fw = fetch_fear_greed(), fetch_cot_nasdaq(), fetch_fedwatch()
+                _te, _fj = fetch_te_calendar(), fetch_financialjuice()
+                _next_ev = (f"{_te['upcoming'][0]['event']} dans {_te['upcoming'][0]['in_hours']}h"
+                            if _te["upcoming"] else "aucun < 24h")
+                log.info(
+                    f"  [INTEL BOARD] F&G:{_fg['score'] if _fg['score'] is not None else 'N/A'}({_fg['rating']}) | "
+                    f"COT:{_cot['net_pct']:+.1f}% {_cot['bias']} | "
+                    f"Fed:{_fw['implied_rate'] if _fw['implied_rate'] is not None else 'N/A'}% {_fw['bias']} | "
+                    f"News:{_fj['bull']}B/{_fj['bear']}b | Prochain événement: {_next_ev}"
+                )
+            except Exception:
+                pass
 
         # 0b. Vérification session XStation5 — relogin automatique si expirée
         try:
@@ -1427,15 +1807,26 @@ class XStation5Bot:
                             kill_zone  = self._current_kill_zone,
                             regime     = self._current_regime,
                             reason     = reason,
+                            sl         = self._initial_sl,
                         )
+                        from session_analytics import export_zella_journal
+                        export_zella_journal(load_history(days=60))
                     except Exception:
                         pass
-                self._cooldown_until = time.time() + config.COOLDOWN_AFTER_TRADE_SEC
-                log.info(f"  Cooldown: {config.COOLDOWN_AFTER_TRADE_SEC // 60} min avant prochain trade")
+                _cd = (getattr(config, "COOLDOWN_AFTER_WIN_SEC", config.COOLDOWN_AFTER_TRADE_SEC)
+                       if pnl > 0 else
+                       getattr(config, "COOLDOWN_AFTER_LOSS_SEC", config.COOLDOWN_AFTER_TRADE_SEC))
+                self._cooldown_until = time.time() + _cd
+                log.info(f"  Cooldown: {_cd // 60} min avant prochain trade ({'gain' if pnl > 0 else 'perte'})")
+                # Mémoriser la clôture pour signal_runner (last_close_reason/pnl/price dans bot_state)
+                self._last_close_reason = "TP" if pnl > 0 else "SL"
+                self._last_pnl          = round(pnl, 2)
+                self._last_close_price  = current
                 if pnl < 0:
                     self._last_entry_price = self._entry_price
                     self._last_trade_side  = self._trade_side
                     self._consecutive_losses += 1
+                    self._daily_losses       += 1
                     self._last_loss_time = time.time()
                     log.warning(
                         f"  Trade fermé en perte — règle anti-re-entrée activée pour {self._trade_side} "
@@ -1464,10 +1855,26 @@ class XStation5Bot:
                 self._trade_side     = None
                 self._tp1_done       = False
                 self._trail_stop     = None
+                self._sltp_confirmed = False
                 self._current_volume = config.VOLUME
                 self._save_state()
                 return  # Attendre le prochain scan après clôture (cooldown actif)
             else:
+                # Retry persistant : tant que le SL/TP n'est pas confirmé côté serveur,
+                # retenter à chaque scan (throttlé 15s) — garantit un TP sur CHAQUE
+                # opération même si l'attache initiale a échoué (DOM lent/indisponible).
+                if (not self._sltp_confirmed and time.time() - self._sltp_last_retry > 15
+                        and self._initial_sl and self._tp2_price and self._entry_price):
+                    self._sltp_last_retry = time.time()
+                    try:
+                        await self._configure_sl_tp(
+                            self._initial_sl, self._tp2_price, self._entry_price)
+                        self._sltp_confirmed = True
+                        self._save_state()
+                        log.info("  [TP RETRY] SL/TP attaché avec succès côté serveur")
+                    except Exception as e:
+                        log.warning(f"  [TP RETRY] Tentative échouée ({e}) — SL/TP software actif, reprise au prochain scan")
+
                 current = await self.get_current_price()
                 if current:
                     pnl = (self._entry_price - current) if self._trade_side == "SHORT" \
@@ -1476,6 +1883,7 @@ class XStation5Bot:
                         f"  Position {self._trade_side} @ {self._entry_price} | "
                         f"Prix: {current:.2f} | P&L: {pnl:+.1f} pts"
                         + (f" | Trail: {self._trail_stop}" if self._trail_stop else "")
+                        + ("" if self._sltp_confirmed else " | [TP non confirmé serveur]")
                     )
                     # Passer l'ATR H1 courant pour le trailing stop (calculé plus bas si nécessaire)
                     # On utilise sig.atr si disponible — ici on passe 0, recalculé dans manage_position
@@ -1589,7 +1997,7 @@ class XStation5Bot:
         conviction = self._conviction_score(sig, macro, mi)
         # Seuil adaptatif : Grade B (M15 fallback aligne D1+H4) accepte 3/10
         # Grade A/A+ exigent 4/10 — signal H1 direct avec confluences multiples
-        min_conviction = 3 if sig.grade == "B" else 4
+        min_conviction = 2 if sig.grade == "B" else 3
         log.info(
             f"  [CONVICTION] Score final: {conviction}/10 — Grade: {sig.grade} "
             f"| seuil: {min_conviction} | size_factor={size_factor:.1f}"
@@ -1620,6 +2028,7 @@ class XStation5Bot:
 
         # Kelly Criterion (demi-Kelly cappé entre 10%-30%)
         kelly_factor = 1.0
+        history = []
         try:
             history = load_history(days=60)
             kelly_data = compute_kelly(history)
@@ -1632,13 +2041,24 @@ class XStation5Bot:
         except Exception:
             kelly_factor = 1.0
 
+        # Facteur kill zone — pénalise les zones prouvées perdantes sur l'historique réel
+        # (ex: LONDON_OPEN/NY_OPEN codées "haute liquidité" mais négatives en pratique)
+        kz_factor = 1.0
+        try:
+            from session_analytics import compute_kill_zone_factor
+            kz_factor, kz_note = compute_kill_zone_factor(sig.kill_zone or "HORS_ZONE", history)
+            if kz_factor < 1.0:
+                log.info(f"  [KILL ZONE] {kz_note}")
+        except Exception:
+            kz_factor = 1.0
+
         kronos_mult = self._kronos_mult
-        combined_factor = round(grade_factor * size_factor * kelly_factor * kronos_mult, 2)
+        combined_factor = round(grade_factor * size_factor * kelly_factor * kz_factor * kronos_mult, 2)
         self._current_volume = round(config.VOLUME * combined_factor, 3)
         self._current_volume = max(config.MIN_VOLUME, min(config.MAX_VOLUME, self._current_volume))
         log.info(
             f"  [SIZING] Grade={sig.grade} ({grade_factor:.2f}x) × News({size_factor:.2f}x) "
-            f"× Kelly({kelly_factor:.2f}x) × Kronos({kronos_mult:.2f}x) "
+            f"× Kelly({kelly_factor:.2f}x) × KZ({kz_factor:.2f}x) × Kronos({kronos_mult:.2f}x) "
             f"= {combined_factor:.2f}x → volume={self._current_volume} lots"
         )
 
@@ -1655,7 +2075,39 @@ class XStation5Bot:
 # ═══════════════════════════════════════════════════════════════════════════════
 # POINT D'ENTRÉE
 # ═══════════════════════════════════════════════════════════════════════════════
+_LOCK_FILE = Path(__file__).parent / "bot.lock"
+_lock_fh = None  # gardé en vie tout le process — le verrou OS se libère seul au crash/exit
+
+
+def _acquire_single_instance_lock() -> bool:
+    """Empêche deux instances du bot de tourner en même temps.
+
+    Découvert le 06/08 : une fenêtre de redémarrage (superviseur tue l'ancien
+    process puis relance avant qu'il soit vraiment mort) a fait tourner deux
+    process en parallèle quelques secondes — chacun a détecté indépendamment
+    la même clôture de position et écrit sa propre entrée dans
+    trade_history.jsonl avec un prix légèrement différent, polluant le Kelly
+    Criterion et les stats kill zone. Le verrou OS (msvcrt.locking) se libère
+    automatiquement à la mort du process, même en cas de crash — pas besoin
+    de cleanup explicite.
+    """
+    global _lock_fh
+    try:
+        _lock_fh = open(_LOCK_FILE, "w")
+        msvcrt.locking(_lock_fh.fileno(), msvcrt.LK_NBLCK, 1)
+        return True
+    except OSError:
+        return False
+
+
 if __name__ == "__main__":
+    if not _acquire_single_instance_lock():
+        log.error(
+            "Une autre instance du bot tourne déjà (bot.lock verrouillé) — "
+            "arrêt immédiat pour éviter les doublons de trade."
+        )
+        sys.exit(1)
+
     bot = XStation5Bot()
     try:
         asyncio.run(bot.run())

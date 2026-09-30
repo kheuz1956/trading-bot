@@ -666,6 +666,18 @@ def run_scan():
         "atr":    round(sig.atr, 1),
     })
 
+    # When API is disabled the operator places the order manually; persist entry_price
+    # so the next scan does not see entry_price=None and emit another duplicate open event.
+    if not (_WS_AVAILABLE and _API_ENABLED) and not state.get("entry_price"):
+        state.update({
+            "entry_price":    sig.entry,
+            "trade_side":     sig.direction,
+            "sl":             sig.sl,
+            "current_volume": recommended_volume,
+            "entry_time":     datetime.now(timezone.utc).isoformat(),
+        })
+        save_state(state)
+
 
 def main():
     log.info("=" * 56)

@@ -47,6 +47,7 @@ _smart_money_engine = _SmartMoneyEngine()
 from jesse_adapter import get_market_regime, get_var_estimate, validate_sl_with_monte_carlo, JESSE_MCP_AVAILABLE
 from trading_library import full_library_assessment, SteenbargerPerformanceTracker
 from pro_routines import run_pro_routine, score_key_levels
+from institutional_signals import get_institutional_filter, log_institutional_context
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 _LOG_DIR = Path(__file__).resolve().parent  # absolute: logs always land beside this file
@@ -509,6 +510,18 @@ def run_scan():
     except Exception:
         pass
 
+    # Institutional Signals — VIX / Yield Curve / DXY / COT / Put-Call / Breadth
+    # Évaluation effectuée AVANT la génération du signal pour court-circuiter tôt
+    _inst_ctx = None
+    try:
+        _inst_ctx = get_institutional_filter(direction="LONG")  # neutre à ce stade
+        log_institutional_context(_inst_ctx)
+        if not _inst_ctx.can_trade:
+            log.warning(f"  [INST] Scan ignoré — {_inst_ctx.block_reason}")
+            return
+    except Exception as e:
+        log.debug(f"institutional_signals error: {e}")
+
     # Signal MTF
     log.info("  Chargement MTF (yfinance)…")
     try:
@@ -542,6 +555,26 @@ def run_scan():
 
     if sig.direction == "SKIP":
         return
+
+    # ── Filtre Institutionnel avec la vraie direction du signal ───────────────
+    try:
+        if _inst_ctx is None:
+            _inst_ctx = get_institutional_filter(direction=sig.direction)
+        else:
+            # Ré-évaluer avec la vraie direction si différente de LONG (neutre initial)
+            if sig.direction == "SHORT":
+                _inst_ctx = get_institutional_filter(direction="SHORT")
+        log_institutional_context(_inst_ctx)
+        if not _inst_ctx.can_trade:
+            log.warning(f"  [INST] Trade bloqué par filtre institutionnel: {_inst_ctx.block_reason}")
+            return
+        # Intégrer le score institutionnel dans le score du signal
+        if hasattr(sig, "score"):
+            inst_bonus = round(_inst_ctx.composite_score * 2, 1)  # échelle ±2
+            sig.score = sig.score + inst_bonus
+            log.info(f"  [INST] Score composite {_inst_ctx.composite_score:+.2f} → bonus signal {inst_bonus:+.1f}")
+    except Exception as e:
+        log.debug(f"inst_filter direction: {e}")
 
     # ── Filtre Trading Library (5 livres) ────────────────────────────────────
     try:

@@ -8,6 +8,14 @@ load_dotenv()
 # Clé gratuite : https://www.alphavantage.co/support/#api-key
 ALPHAVANTAGE_API_KEY = os.getenv("ALPHAVANTAGE_API_KEY", "")
 
+# FMP (Financial Modeling Prep) — COT, institutional holdings, earnings
+# Clé gratuite (250 req/j) : https://financialmodelingprep.com/developer/docs/
+FMP_API_KEY = os.getenv("FMP_API_KEY", "")
+
+# Polygon.io — Options flow temps réel (payant, free tier limité)
+# Clé gratuite : https://polygon.io/
+POLYGON_API_KEY = os.getenv("POLYGON_API_KEY", "")
+
 # ─── Compte XTB ──────────────────────────────────────────────────────────────
 ACCOUNT_ID = os.getenv("XTB_ACCOUNT_ID", "")
 PASSWORD   = os.getenv("XTB_PASSWORD", "")

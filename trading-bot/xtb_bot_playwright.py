@@ -219,8 +219,8 @@ def calc_levels(signal: str, snap: dict) -> dict:
 
 
 def get_ohlcv() -> pd.DataFrame:
-    """Charge les données H1 US100 via yfinance — NQZ26=F (déc.) puis NQ=F puis ^NDX en fallback."""
-    _tickers = ["NQZ26=F", "NQ=F", "^NDX", "QQQ"]
+    """Charge les données H1 US100 via yfinance — NQ=F (continu) puis NQH27=F puis ^NDX en fallback."""
+    _tickers = ["NQ=F", "NQH27=F", "^NDX", "QQQ"]
     for _sym in _tickers:
         try:
             raw = yf.download(_sym, period="10d", interval="1h",
@@ -1507,10 +1507,10 @@ class XStation5Bot:
                 return float(price)
         except Exception:
             pass
-        # Fallback yfinance — essayer NQZ26=F (décembre) puis NQ=F puis ^NDX
+        # Fallback yfinance — NQ=F (continu) puis NQH27=F (mars 2027) puis ^NDX
         # Validation anti-corruption : rejeter tout prix déviant >15% du dernier prix connu
         _ref = self._entry_price or getattr(self, "_last_known_price", None)
-        for _ticker in ("NQZ26=F", "NQ=F", "^NDX", "QQQ"):
+        for _ticker in ("NQ=F", "NQH27=F", "^NDX", "QQQ"):
             try:
                 import yfinance as yf
                 df = yf.download(_ticker, period="1d", interval="1m", progress=False, auto_adjust=True)

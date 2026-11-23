@@ -84,7 +84,7 @@ class ProSignal:
 
 # ── Chargement multi-timeframe ────────────────────────────────────────────────
 
-_TICKERS = ["NQ=F", "^NDX", "QQQ"]  # fallback chain si yfinance indisponible
+_TICKERS = ["NQ=F", "NQH27=F", "^NDX", "QQQ"]  # NQ=F = contrat continu ; NQH27=F = mars 2027 (fallback)
 
 def _download(period: str, interval: str) -> pd.DataFrame:
     for ticker in _TICKERS:
@@ -104,8 +104,13 @@ def _download(period: str, interval: str) -> pd.DataFrame:
                 "Volume": raw["Volume"].to_numpy().ravel(),
             }, index=pd.to_datetime(idx, utc=True))
             df = df.dropna()
-            if not df.empty:
-                return df
+            if df.empty:
+                continue
+            # Rejeter si Close < 10000 (contrat expiré ou données corrompues)
+            last_close = float(df["Close"].iloc[-1])
+            if last_close < 10000:
+                continue
+            return df
         except Exception:
             continue
     return pd.DataFrame()
@@ -1194,7 +1199,7 @@ def analyze_h1(df: pd.DataFrame) -> dict:
         # Contexte baissier — SHORT potentiel
         if not (t < k):  skip_reasons.append(f"TK haussier (T{t:.0f}>K{k:.0f}) — pas SHORT")
         if not (h < 0):  skip_reasons.append(f"MACD haussier ({h:.1f}) — momentum contre SHORT")
-        if a < 18:       skip_reasons.append(f"ADX très faible ({a:.1f}<18) — range")
+        if a < 14:       skip_reasons.append(f"ADX très faible ({a:.1f}<14) — range")
         elif a < config.ADX_MIN:
             skip_reasons.append(f"ADX limite ({a:.1f}<{config.ADX_MIN}) — tendance faible")
         if r > 65:       skip_reasons.append(f"RSI surachat ({r:.0f}) — pas SHORT")
@@ -1202,7 +1207,7 @@ def analyze_h1(df: pd.DataFrame) -> dict:
         # Contexte haussier — LONG potentiel
         if not (t > k):  skip_reasons.append(f"TK baissier (T{t:.0f}<K{k:.0f}) — pas LONG")
         if not (h > 0):  skip_reasons.append(f"MACD baissier ({h:.1f}) — momentum contre LONG")
-        if a < 18:       skip_reasons.append(f"ADX très faible ({a:.1f}<18) — range")
+        if a < 14:       skip_reasons.append(f"ADX très faible ({a:.1f}<14) — range")
         if r < 35:       skip_reasons.append(f"RSI survente ({r:.0f}) — pas LONG")
     else:
         skip_reasons.append(f"Prix entre kumo_bot {kumo_bot:.0f} et kumo_top {kumo_top:.0f}")
@@ -1565,6 +1570,674 @@ def detect_liq_cisd_fvg(
 
 # ── Moteur de scoring — A+ / A / B ───────────────────────────────────────────
 
+# ══════════════════════════════════════════════════════════════════════════════
+# SKILL 11 : DOW THEORY — confirmation inter-marchés + phases de tendance
+# ══════════════════════════════════════════════════════════════════════════════
+
+def analyze_dow_theory(df_nq: pd.DataFrame) -> dict:
+    """
+    Théorie de Dow appliquée au NQ100 :
+    1. Confirmation inter-marchés : NQ doit être confirmé par SPX (^GSPC)
+    2. Phases primaires : Accumulation / Markup / Distribution / Markdown
+    3. Volume confirme la direction
+    4. Tendance assumée en vigueur jusqu'à signal clair de retournement
+    """
+    empty = {
+        "confirmed":       False,
+        "nq_trend":        "NEUTRE",
+        "spx_trend":       "NEUTRE",
+        "phase":           "UNKNOWN",
+        "volume_confirms": False,
+        "divergence":      False,
+        "dow_signal":      "NEUTRE",
+    }
+
+    if df_nq is None or len(df_nq) < 10:
+        return empty
+
+    # ── 1. Télécharger SPX pour la confirmation inter-marchés ─────────────────
+    df_spx = pd.DataFrame()
+    for spx_ticker in ("^GSPC", "SPY"):
+        try:
+            raw = yf.download(spx_ticker, period="30d", interval="1d",
+                              progress=False, auto_adjust=True)
+            if raw.empty:
+                continue
+            if isinstance(raw.columns, pd.MultiIndex):
+                raw.columns = raw.columns.get_level_values(0)
+            vol_col = raw["Volume"].to_numpy().ravel() if "Volume" in raw.columns else np.ones(len(raw))
+            df_spx = pd.DataFrame({
+                "High":   raw["High"].to_numpy().ravel(),
+                "Low":    raw["Low"].to_numpy().ravel(),
+                "Close":  raw["Close"].to_numpy().ravel(),
+                "Volume": vol_col,
+            }).dropna()
+            if not df_spx.empty:
+                break
+        except Exception:
+            continue
+
+    if df_spx.empty:
+        return empty
+
+    # ── 2. Tendance par structure de swings Dow (HH/HL ou LH/LL) ─────────────
+    def _dow_swing_trend(df: pd.DataFrame, window: int = 20) -> str:
+        df_w = df.iloc[-window:] if len(df) >= window else df
+        if len(df_w) < 6:
+            return "NEUTRE"
+        highs = df_w["High"].rolling(3).max().dropna()
+        lows  = df_w["Low"].rolling(3).min().dropna()
+        if len(highs) < 3 or len(lows) < 3:
+            return "NEUTRE"
+        hh = float(highs.iloc[-1]) > float(highs.iloc[-3])
+        hl = float(lows.iloc[-1])  > float(lows.iloc[-3])
+        lh = float(highs.iloc[-1]) < float(highs.iloc[-3])
+        ll = float(lows.iloc[-1])  < float(lows.iloc[-3])
+        if hh and hl:
+            return "HAUSSIER"
+        if lh and ll:
+            return "BAISSIER"
+        return "NEUTRE"
+
+    nq_trend  = _dow_swing_trend(df_nq)
+    spx_trend = _dow_swing_trend(df_spx)
+
+    confirmed  = (nq_trend == spx_trend and nq_trend != "NEUTRE")
+    divergence = (nq_trend != "NEUTRE" and spx_trend != "NEUTRE" and nq_trend != spx_trend)
+
+    # ── 3. Phase de tendance primaire (3 phases classiques de Dow) ────────────
+    phase = "UNKNOWN"
+    try:
+        cl  = df_nq["Close"].iloc[-20:] if len(df_nq) >= 20 else df_nq["Close"]
+        vol = df_nq["Volume"].iloc[-20:] if len(df_nq) >= 20 else df_nq["Volume"]
+
+        mid  = len(vol) // 2
+        vol_recent = float(vol.iloc[mid:].mean()) if vol.sum() > 0 else 0
+        vol_past   = float(vol.iloc[:mid].mean())  if vol.sum() > 0 else 1
+        vol_rising = vol_recent > vol_past * 1.05
+
+        recent_range_pct = float(
+            (cl.iloc[-10:].max() - cl.iloc[-10:].min()) / cl.iloc[-10:].mean() * 100
+        ) if len(cl) >= 10 else 5.0
+
+        if nq_trend == "NEUTRE" and recent_range_pct < 2.0:
+            phase = "ACCUMULATION"
+        elif nq_trend == "HAUSSIER" and vol_rising:
+            phase = "MARKUP"
+        elif nq_trend == "HAUSSIER" and not vol_rising:
+            phase = "DISTRIBUTION"
+        elif nq_trend == "BAISSIER" and vol_rising:
+            phase = "MARKDOWN"
+        elif nq_trend == "BAISSIER" and not vol_rising:
+            phase = "REACCUMULATION"
+        else:
+            phase = "TRANSITION"
+    except Exception:
+        pass
+
+    # ── 4. Volume confirme la direction ───────────────────────────────────────
+    volume_confirms = False
+    try:
+        sl = df_nq.iloc[-5:] if len(df_nq) >= 5 else df_nq
+        up_vol   = float(sl["Volume"][sl["Close"] > sl["Open"]].mean() or 0)
+        down_vol = float(sl["Volume"][sl["Close"] < sl["Open"]].mean() or 0)
+        if nq_trend == "HAUSSIER":
+            volume_confirms = up_vol > down_vol * 1.1
+        elif nq_trend == "BAISSIER":
+            volume_confirms = down_vol > up_vol * 1.1
+    except Exception:
+        pass
+
+    # ── 5. Signal Dow Theory global ───────────────────────────────────────────
+    if divergence:
+        dow_signal = "DIVERGENCE"
+    elif confirmed:
+        dow_signal = nq_trend
+    else:
+        dow_signal = "NEUTRE"
+
+    return {
+        "confirmed":       confirmed,
+        "nq_trend":        nq_trend,
+        "spx_trend":       spx_trend,
+        "phase":           phase,
+        "volume_confirms": volume_confirms,
+        "divergence":      divergence,
+        "dow_signal":      dow_signal,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SKILL 12 : WEEKLY BIAS — tendance primaire W1 (Higher Highs/Lows vs Lower)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def analyze_w1(df_w1: pd.DataFrame) -> dict:
+    """Tendance hebdomadaire via swing Dow (HH/HL haussier, LH/LL baissier)."""
+    empty = {"bias": "NEUTRE", "trend_strength": "FAIBLE"}
+    if df_w1 is None or len(df_w1) < 4:
+        return empty
+    df = df_w1.iloc[-8:] if len(df_w1) >= 8 else df_w1
+    highs = df["High"].to_numpy().ravel()
+    lows  = df["Low"].to_numpy().ravel()
+    hh = float(highs[-1]) > float(highs[-3]) and float(highs[-2]) > float(highs[-4])
+    hl = float(lows[-1])  > float(lows[-3])  and float(lows[-2])  > float(lows[-4])
+    lh = float(highs[-1]) < float(highs[-3]) and float(highs[-2]) < float(highs[-4])
+    ll = float(lows[-1])  < float(lows[-3])  and float(lows[-2])  < float(lows[-4])
+    if hh and hl:
+        bias     = "HAUSSIER"
+        strength = "FORT" if float(highs[-1]) > float(highs[:-1].max()) else "MOYEN"
+    elif lh and ll:
+        bias     = "BAISSIER"
+        strength = "FORT" if float(lows[-1]) < float(lows[:-1].min()) else "MOYEN"
+    else:
+        bias     = "NEUTRE"
+        strength = "FAIBLE"
+    return {"bias": bias, "trend_strength": strength}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SKILL 14 : CORRÉLATION VIX / DXY / BONDS — filtre cross-asset macro
+# ══════════════════════════════════════════════════════════════════════════════
+
+def analyze_macro_correlation(direction: str) -> dict:
+    """
+    Télécharge VIX (^VIX), DXY (DX-Y.NYB) et taux 10Y (^TNX).
+    Retourne : block (bool), warnings (list[str]), confluences (list[str]).
+    """
+    result = {
+        "vix": None, "dxy_trend": "NEUTRE", "bonds_trend": "NEUTRE",
+        "block": False, "block_reason": "",
+        "confluences": [], "warnings": [],
+    }
+    for ticker, key in (("^VIX", "vix_raw"), ("DX-Y.NYB", "dxy_raw"), ("^TNX", "tnx_raw")):
+        try:
+            raw = yf.download(ticker, period="10d", interval="1d", progress=False, auto_adjust=True)
+            if raw.empty:
+                continue
+            if isinstance(raw.columns, pd.MultiIndex):
+                raw.columns = raw.columns.get_level_values(0)
+            result[key] = raw["Close"].to_numpy().ravel()
+        except Exception:
+            pass
+
+    vix_arr = result.pop("vix_raw", None)
+    dxy_arr = result.pop("dxy_raw", None)
+    tnx_arr = result.pop("tnx_raw", None)
+
+    if vix_arr is not None and len(vix_arr) >= 1:
+        result["vix"] = float(vix_arr[-1])
+    if dxy_arr is not None and len(dxy_arr) >= 3:
+        result["dxy_trend"] = (
+            "HAUSSIER" if float(dxy_arr[-1]) > float(dxy_arr[-3]) * 1.001
+            else "BAISSIER" if float(dxy_arr[-1]) < float(dxy_arr[-3]) * 0.999
+            else "NEUTRE"
+        )
+    if tnx_arr is not None and len(tnx_arr) >= 3:
+        result["bonds_trend"] = (
+            "YIELDS_RISING"  if float(tnx_arr[-1]) > float(tnx_arr[-3]) * 1.005
+            else "YIELDS_FALLING" if float(tnx_arr[-1]) < float(tnx_arr[-3]) * 0.995
+            else "NEUTRE"
+        )
+
+    vix   = result["vix"]
+    dxy   = result["dxy_trend"]
+    bonds = result["bonds_trend"]
+
+    # VIX > 35 : risque systémique — blocage total
+    if vix and vix >= 35:
+        result["block"]        = True
+        result["block_reason"] = f"VIX EXTRÊME ({vix:.1f} ≥ 35) — risque systémique, trading suspendu"
+    # VIX < 15 + SHORT : marché trop complaisant
+    elif vix and vix < 15 and direction == "SHORT":
+        result["warnings"].append(f"VIX très bas ({vix:.1f}) — complacence élevée, short risqué")
+    # VIX 15–25 + direction alignée au sentiment
+    elif vix and 15 <= vix <= 25:
+        if direction == "SHORT":
+            result["confluences"].append(f"VIX modéré ({vix:.1f}) — volatilité saine pour SHORT")
+        else:
+            result["confluences"].append(f"VIX modéré ({vix:.1f}) — volatilité saine pour LONG")
+    elif vix and vix > 25:
+        result["warnings"].append(f"VIX élevé ({vix:.1f} > 25) — réduire taille position")
+
+    # DXY corrélation (inversement corrélé à NQ en général)
+    if dxy == "HAUSSIER" and direction == "LONG":
+        result["warnings"].append(f"DXY haussier — pression baissière sur NQ (vent contraire LONG)")
+    elif dxy == "BAISSIER" and direction == "LONG":
+        result["confluences"].append(f"DXY baissier — favorable LONG NQ (vent favorable)")
+    elif dxy == "HAUSSIER" and direction == "SHORT":
+        result["confluences"].append(f"DXY haussier — favorable SHORT NQ (corrélation inverse)")
+    elif dxy == "BAISSIER" and direction == "SHORT":
+        result["warnings"].append(f"DXY baissier — défavorable SHORT NQ")
+
+    # Taux 10Y / Bonds
+    if bonds == "YIELDS_RISING" and direction == "LONG":
+        result["warnings"].append(f"Taux 10Y en hausse — risk-off, défavorable LONG NQ")
+    elif bonds == "YIELDS_RISING" and direction == "SHORT":
+        result["confluences"].append(f"Taux 10Y en hausse — risk-off confirme SHORT NQ")
+    elif bonds == "YIELDS_FALLING" and direction == "SHORT":
+        result["warnings"].append(f"Taux 10Y en baisse — risk-on, défavorable SHORT NQ")
+    elif bonds == "YIELDS_FALLING" and direction == "LONG":
+        result["confluences"].append(f"Taux 10Y en baisse — risk-on confirme LONG NQ")
+
+    return result
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SKILL 16 : TD SEQUENTIAL (Tom DeMark) — détection d'épuisement de tendance
+# ══════════════════════════════════════════════════════════════════════════════
+
+def analyze_td_sequential(df: pd.DataFrame, lookback: int = 60) -> dict:
+    """
+    TD Sequential simplifié :
+    - Sell Setup (9) : 9 barres consécutives où C > C[-4] → uptrend épuisé → SHORT opportunité
+    - Buy Setup (9)  : 9 barres consécutives où C < C[-4] → downtrend épuisé → LONG opportunité
+    - TD 13 (Countdown) : confirmation parfaite de la zone de retournement
+    """
+    empty = {"setup": 0, "setup_dir": "NONE", "exhaustion": False, "countdown": 0, "signal": "NEUTRE"}
+    if df is None or len(df) < 10:
+        return empty
+    df_use = df.iloc[-lookback:] if len(df) >= lookback else df
+    closes = df_use["Close"].to_numpy().ravel()
+    n = len(closes)
+    if n < 5:
+        return empty
+
+    setup_count = 0
+    setup_dir   = "NONE"
+    for i in range(n - 1, 3, -1):
+        diff = float(closes[i]) - float(closes[i - 4])
+        if setup_count == 0:
+            setup_dir = "SELL_SETUP" if diff > 0 else ("BUY_SETUP" if diff < 0 else "NONE")
+            if setup_dir == "NONE":
+                break
+        if setup_dir == "SELL_SETUP" and diff > 0:
+            setup_count += 1
+        elif setup_dir == "BUY_SETUP" and diff < 0:
+            setup_count += 1
+        else:
+            break
+
+    exhaustion = setup_count >= 9
+    countdown  = min(setup_count, 13) if exhaustion else 0
+
+    # SELL_SETUP épuisé → marché suacheté → SHORT opportunité
+    # BUY_SETUP épuisé  → marché survendu → LONG opportunité
+    signal = "NEUTRE"
+    if exhaustion:
+        signal = "SHORT_EXHAUSTION" if setup_dir == "SELL_SETUP" else "LONG_EXHAUSTION"
+
+    return {
+        "setup": setup_count, "setup_dir": setup_dir,
+        "exhaustion": exhaustion, "countdown": countdown, "signal": signal,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SKILL 17 : STAN WEINSTEIN STAGE ANALYSIS — 30-week MA filter
+# ══════════════════════════════════════════════════════════════════════════════
+
+def analyze_weinstein_stage(df_w1: pd.DataFrame) -> dict:
+    """
+    4 phases de Weinstein (30-week SMA) :
+    Stage 1 (Base)     : prix autour MA30W, MA plate
+    Stage 2 (Avance)   : prix > MA30W et MA monte → LONG uniquement
+    Stage 3 (Sommet)   : prix > MA30W mais MA s'aplatit
+    Stage 4 (Déclin)   : prix < MA30W et MA descend → SHORT uniquement
+    Règle absolue : jamais shorter un Stage 2, jamais longer un Stage 4.
+    """
+    empty = {"stage": 0, "stage_name": "INCONNU", "ma30w": None, "bias": "NEUTRE",
+             "price_above_ma": None, "ma_rising": None}
+    if df_w1 is None or len(df_w1) < 10:
+        return empty
+
+    closes = df_w1["Close"].to_numpy().ravel()
+    window = min(30, len(closes))
+    ma30   = float(np.mean(closes[-window:]))
+    prev_w = min(30, len(closes) - 1)
+    ma30_prev = float(np.mean(closes[-prev_w - 1:-1])) if len(closes) >= 2 else ma30
+
+    price_above = float(closes[-1]) > ma30
+    ma_rising   = ma30 > ma30_prev * 1.001  # 0.1% de marge pour éviter le bruit
+
+    if price_above and ma_rising:
+        stage, name, bias = 2, "AVANCE (Stage 2)", "HAUSSIER"
+    elif not price_above and not ma_rising:
+        stage, name, bias = 4, "DÉCLIN (Stage 4)", "BAISSIER"
+    elif price_above and not ma_rising:
+        stage, name, bias = 3, "SOMMET (Stage 3)", "NEUTRE"
+    else:
+        stage, name, bias = 1, "BASE (Stage 1)", "NEUTRE"
+
+    return {
+        "stage": stage, "stage_name": name, "bias": bias,
+        "ma30w": round(ma30, 2), "price_above_ma": price_above, "ma_rising": ma_rising,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SKILL 28 : LIQUIDITÉ — cartographie des poches + ciblage (draw on liquidity, ICT)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def map_liquidity(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
+                  atr: float, price: float) -> dict:
+    """Cartographie complète de la liquidité NQ et détermine la cible (draw).
+
+    Poches identifiées (là où reposent les stops) :
+      - PDH / PDL       : haut / bas de la veille (liquidité majeure)
+      - Session H / L   : extrêmes de la session courante
+      - EQH / EQL       : hauts / bas égaux (double-tops/bottoms = clusters de stops)
+
+    Retourne un dict avec les poches, la poche balayée le plus récemment,
+    et la 'draw on liquidity' = poche opposée non prise vers laquelle le
+    prix est aspiré (utilisable comme cible de TP institutionnelle).
+    """
+    empty = {"pools_above": [], "pools_below": [], "swept": None,
+             "draw_target": None, "draw_dir": "NONE", "confluences": [], "warnings": []}
+    if df_h1 is None or df_h1.empty or len(df_h1) < 30:
+        return empty
+
+    hi, lo, cl = df_h1["High"].values, df_h1["Low"].values, df_h1["Close"].values
+    confluences: list[str] = []
+    warnings:    list[str] = []
+
+    # ── PDH / PDL (approximés sur 24 dernières bougies H1) ────────────────────
+    pdh = float(df_h1["High"].iloc[-24:].max())
+    pdl = float(df_h1["Low"].iloc[-24:].min())
+
+    # ── Extrêmes de session courante (8 dernières H1 ~ session) ──────────────
+    sess_h = float(df_h1["High"].iloc[-8:].max())
+    sess_l = float(df_h1["Low"].iloc[-8:].min())
+
+    # ── EQH / EQL : hauts/bas quasi-égaux (clusters de stops) ─────────────────
+    tol = atr * 0.15
+    eqh, eql = [], []
+    for i in range(len(hi) - 20, len(hi) - 2):
+        if i < 1:
+            continue
+        for j in range(i + 1, len(hi) - 1):
+            if abs(hi[i] - hi[j]) <= tol and abs(i - j) >= 2:
+                eqh.append(max(hi[i], hi[j])); break
+        for j in range(i + 1, len(lo) - 1):
+            if abs(lo[i] - lo[j]) <= tol and abs(i - j) >= 2:
+                eql.append(min(lo[i], lo[j])); break
+
+    # ── Assembler les poches au-dessus / en-dessous du prix ──────────────────
+    raw_above = [("PDH", pdh), ("SessionH", sess_h)] + [("EQH", e) for e in eqh]
+    raw_below = [("PDL", pdl), ("SessionL", sess_l)] + [("EQL", e) for e in eql]
+    pools_above = sorted({(n, round(float(v), 1)) for n, v in raw_above if v > price + tol},
+                         key=lambda x: x[1])
+    pools_below = sorted({(n, round(float(v), 1)) for n, v in raw_below if v < price - tol},
+                         key=lambda x: x[1], reverse=True)
+
+    # ── Sweep récent : une poche a-t-elle été percée puis rejetée (≤3 H1) ? ───
+    swept = None
+    for age in range(1, 4):
+        idx = len(hi) - 1 - age
+        if idx < 1:
+            break
+        # Sweep haussier : mèche sous une poche basse puis clôture au-dessus
+        for name, lvl in [("PDL", pdl), ("SessionL", sess_l)] + [("EQL", e) for e in eql]:
+            if lo[idx] < lvl - atr * 0.1 and cl[idx] > lvl:
+                swept = {"side": "SSL", "level": round(float(lvl), 1), "name": name, "age": age}
+                break
+        if swept:
+            break
+        for name, lvl in [("PDH", pdh), ("SessionH", sess_h)] + [("EQH", e) for e in eqh]:
+            if hi[idx] > lvl + atr * 0.1 and cl[idx] < lvl:
+                swept = {"side": "BSL", "level": round(float(lvl), 1), "name": name, "age": age}
+                break
+        if swept:
+            break
+
+    # ── Draw on liquidity : après un sweep, le prix vise la poche opposée ─────
+    draw_target, draw_dir = None, "NONE"
+    if swept:
+        if swept["side"] == "SSL" and pools_above:
+            draw_target = pools_above[0][1]   # poche haute la plus proche
+            draw_dir = "LONG"
+            confluences.append(
+                f"Liquidité {swept['name']} @ {swept['level']} balayée (SSL) → "
+                f"draw vers {pools_above[0][0]} {draw_target}")
+        elif swept["side"] == "BSL" and pools_below:
+            draw_target = pools_below[0][1]
+            draw_dir = "SHORT"
+            confluences.append(
+                f"Liquidité {swept['name']} @ {swept['level']} balayée (BSL) → "
+                f"draw vers {pools_below[0][0]} {draw_target}")
+
+    # ── Avertissement : liquidité proche DANS le sens du trade (obstacle) ─────
+    # (calculé côté appelant qui connaît la direction — exposé via pools)
+    return {"pools_above": pools_above, "pools_below": pools_below,
+            "swept": swept, "draw_target": draw_target, "draw_dir": draw_dir,
+            "pdh": round(pdh, 1), "pdl": round(pdl, 1),
+            "confluences": confluences, "warnings": warnings}
+
+
+def analyze_liquidity(direction: str, df_h1: pd.DataFrame, df_m15: pd.DataFrame,
+                      atr: float, entry: float) -> dict:
+    """Enveloppe directionnelle de map_liquidity pour le scoring.
+
+    - draw aligné avec la direction → confluence forte (+ cible TP suggérée)
+    - draw opposé → avertissement (on trade contre l'aspiration de liquidité)
+    - poche de liquidité proche dans le sens du trade → obstacle (stall probable)
+    """
+    liq = map_liquidity(df_h1, df_m15, atr, entry)
+    confluences = list(liq["confluences"])
+    warnings    = list(liq["warnings"])
+    tp_suggest  = None
+
+    if liq["draw_dir"] == direction and liq["draw_target"]:
+        tp_suggest = liq["draw_target"]
+        confluences.append(f"DRAW aligné {direction} — cible liquidité {tp_suggest}")
+    elif liq["draw_dir"] not in ("NONE", direction):
+        warnings.append(
+            f"Draw on liquidity vers {liq['draw_dir']} — trade {direction} "
+            f"contre l'aspiration institutionnelle")
+
+    # Obstacle : première poche dans le sens du trade trop proche (< 0.5 ATR)
+    near_pools = liq["pools_below"] if direction == "SHORT" else liq["pools_above"]
+    if near_pools:
+        nxt_name, nxt_lvl = near_pools[0]
+        if abs(entry - nxt_lvl) < atr * 0.5:
+            warnings.append(
+                f"Poche {nxt_name} @ {nxt_lvl} à {abs(entry-nxt_lvl):.0f} pts — "
+                f"liquidité proche freine le mouvement {direction}")
+
+    return {"confluences": confluences, "warnings": warnings,
+            "tp_suggest": tp_suggest, "detail": liq}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SKILLS 21-24 : MICROSTRUCTURE — ADR, divergence ES/NQ, divergence RSI, niveaux ronds
+# ══════════════════════════════════════════════════════════════════════════════
+
+def analyze_microstructure(direction: str, df_d1: pd.DataFrame,
+                           df_m15: pd.DataFrame, entry: float) -> dict:
+    """SKILLS 21-24 regroupés — retourne {confluences: [...], warnings: [...]}."""
+    confluences: list[str] = []
+    warnings:    list[str] = []
+
+    # ── SKILL 21 : ADR exhaustion ─────────────────────────────────────────────
+    try:
+        rng = (df_d1["High"] - df_d1["Low"]).dropna()
+        if len(rng) >= 15:
+            adr = float(rng.iloc[-15:-1].mean())
+            today_range = float(rng.iloc[-1])
+            consumed = today_range / adr if adr > 0 else 0
+            if consumed >= 0.8:
+                warnings.append(
+                    f"ADR consommé {consumed*100:.0f}% ({today_range:.0f}/{adr:.0f} pts) "
+                    f"— entrée tardive dans le mouvement du jour")
+            elif consumed <= 0.4:
+                confluences.append(f"ADR consommé {consumed*100:.0f}% — potentiel de range restant")
+    except Exception:
+        pass
+
+    # ── SKILL 22 : Divergence ES/NQ (confirmation inter-marchés, Murphy) ─────
+    try:
+        es = yf.download("ES=F", period="5d", interval="1h", progress=False, auto_adjust=True)
+        if not es.empty:
+            if isinstance(es.columns, pd.MultiIndex):
+                es.columns = es.columns.get_level_values(0)
+            es_c = es["Close"].dropna()
+            nq_c = df_m15["Close"].dropna() if not df_m15.empty else pd.Series(dtype=float)
+            if len(es_c) >= 20 and len(nq_c) >= 20:
+                es_new_low  = float(es_c.iloc[-1]) <= float(es_c.iloc[-20:].min()) * 1.0005
+                es_new_high = float(es_c.iloc[-1]) >= float(es_c.iloc[-20:].max()) * 0.9995
+                nq_new_low  = float(nq_c.iloc[-1]) <= float(nq_c.iloc[-20:].min()) * 1.0005
+                nq_new_high = float(nq_c.iloc[-1]) >= float(nq_c.iloc[-20:].max()) * 0.9995
+                if direction == "SHORT" and nq_new_low and not es_new_low:
+                    warnings.append("ES ne confirme pas le nouveau bas NQ — divergence inter-marchés")
+                elif direction == "SHORT" and nq_new_low and es_new_low:
+                    confluences.append("ES confirme le bas NQ — faiblesse générale des indices")
+                elif direction == "LONG" and nq_new_high and not es_new_high:
+                    warnings.append("ES ne confirme pas le nouveau haut NQ — divergence inter-marchés")
+                elif direction == "LONG" and nq_new_high and es_new_high:
+                    confluences.append("ES confirme le haut NQ — force générale des indices")
+    except Exception:
+        pass
+
+    # ── SKILL 23 : Divergence RSI M15 (prix vs momentum) ─────────────────────
+    try:
+        if not df_m15.empty and len(df_m15) >= 40:
+            cl = df_m15["Close"]
+            delta = cl.diff()
+            gain = delta.clip(lower=0).ewm(com=13, adjust=False).mean()
+            loss = (-delta.clip(upper=0)).ewm(com=13, adjust=False).mean()
+            rsi = (100 - 100 / (1 + gain / loss.replace(0, float("nan")))).dropna()
+            half = 15
+            p_prev, p_last = float(cl.iloc[-2*half:-half].min()), float(cl.iloc[-half:].min())
+            r_at_prev = float(rsi.iloc[-2*half:-half].min())
+            r_at_last = float(rsi.iloc[-half:].min())
+            p_prev_h, p_last_h = float(cl.iloc[-2*half:-half].max()), float(cl.iloc[-half:].max())
+            r_prev_h, r_last_h = float(rsi.iloc[-2*half:-half].max()), float(rsi.iloc[-half:].max())
+            if p_last < p_prev and r_at_last > r_at_prev + 2:
+                # Bas plus bas mais RSI plus haut = divergence haussière
+                (warnings if direction == "SHORT" else confluences).append(
+                    "Divergence RSI haussière M15 (bas plus bas, momentum plus haut)")
+            elif p_last_h > p_prev_h and r_last_h < r_prev_h - 2:
+                (warnings if direction == "LONG" else confluences).append(
+                    "Divergence RSI baissière M15 (haut plus haut, momentum plus bas)")
+    except Exception:
+        pass
+
+    # ── SKILL 24 : Niveaux ronds (TP naturels de la foule) ───────────────────
+    try:
+        next_level = (int(entry // 100) * 100) if direction == "SHORT" \
+                     else (int(entry // 100) * 100 + 100)
+        dist = abs(entry - next_level)
+        if dist <= 15:
+            warnings.append(
+                f"Niveau rond {next_level} à {dist:.0f} pts dans le sens du trade — "
+                f"stall probable (TP de la foule)")
+        if next_level % 500 == 0 and dist <= 40:
+            warnings.append(f"Niveau majeur {next_level} ({dist:.0f} pts) — zone de bataille")
+    except Exception:
+        pass
+
+    # ── SKILL 25 : Épuisement de série (mean reversion, Livermore) ────────────
+    try:
+        if not df_m15.empty and len(df_m15) >= 8:
+            o = df_m15["Open"]; c = df_m15["Close"]
+            dirs = [1 if c.iloc[k] > o.iloc[k] else -1 for k in range(-7, 0)]
+            streak = 1
+            for k in range(len(dirs) - 2, -1, -1):
+                if dirs[k] == dirs[-1]:
+                    streak += 1
+                else:
+                    break
+            if streak >= 5:
+                streak_dir = "SHORT" if dirs[-1] == 1 else "LONG"  # contrarian
+                if direction == streak_dir:
+                    confluences.append(
+                        f"Épuisement M15: {streak} bougies {'vertes' if dirs[-1]==1 else 'rouges'} "
+                        f"— reversion favorable {direction}")
+                else:
+                    warnings.append(
+                        f"Série M15 de {streak} bougies dans le sens du trade — "
+                        f"entrée en fin de mouvement")
+    except Exception:
+        pass
+
+    # ── SKILL 26 : Climax de volume (blow-off vs breakout sain) ───────────────
+    try:
+        if not df_m15.empty and "Volume" in df_m15 and len(df_m15) >= 25:
+            vol = df_m15["Volume"].dropna()
+            if len(vol) >= 25 and float(vol.iloc[-21:-1].mean()) > 0:
+                vratio = float(vol.iloc[-1]) / float(vol.iloc[-21:-1].mean())
+                rng = df_m15["High"] - df_m15["Low"]
+                body = (df_m15["Close"] - df_m15["Open"]).abs()
+                last_body_pct = float(body.iloc[-1]) / max(float(rng.iloc[-1]), 1e-9)
+                if vratio >= 2.5 and last_body_pct < 0.4:
+                    warnings.append(
+                        f"Climax de volume ×{vratio:.1f} avec mèche dominante — "
+                        f"épuisement probable, éviter l'entrée")
+                elif vratio >= 1.8 and last_body_pct >= 0.6:
+                    confluences.append(
+                        f"Volume ×{vratio:.1f} sur corps plein — conviction du mouvement")
+    except Exception:
+        pass
+
+    # ── SKILL 27 : Gap d'ouverture non comblé (aimant de prix) ────────────────
+    try:
+        if not df_d1.empty and len(df_d1) >= 2:
+            prev_close = float(df_d1["Close"].iloc[-2])
+            today_open = float(df_d1["Open"].iloc[-1])
+            gap = today_open - prev_close
+            if abs(gap) >= 30:
+                # Un gap agit comme aimant : le prix tend à revenir le combler
+                gap_dir = "SHORT" if gap > 0 else "LONG"  # sens du comblement
+                still_open = ((direction == "SHORT" and entry > prev_close) or
+                              (direction == "LONG" and entry < prev_close))
+                if direction == gap_dir and still_open:
+                    confluences.append(
+                        f"Gap d'ouverture {gap:+.0f} pts non comblé — "
+                        f"aimant vers {prev_close:.0f} favorable {direction}")
+    except Exception:
+        pass
+
+    return {"confluences": confluences, "warnings": warnings}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SKILL 19 : PUT/CALL RATIO — sentiment institutionnel options flow QQQ
+# ══════════════════════════════════════════════════════════════════════════════
+
+def analyze_put_call_ratio(direction: str) -> dict:
+    """
+    Télécharge la chaîne d'options QQQ (proxy NQ).
+    P/C > 1.2 → fear extrême → signal contrarian LONG
+    P/C < 0.7 → euphorie     → signal contrarian SHORT
+    """
+    result = {"pc_ratio": None, "sentiment": "NEUTRE", "confluences": [], "warnings": []}
+    try:
+        qqq  = yf.Ticker("QQQ")
+        exps = qqq.options
+        if not exps:
+            return result
+        opt      = qqq.option_chain(exps[0])
+        put_vol  = float(opt.puts["volume"].fillna(0).sum())
+        call_vol = float(opt.calls["volume"].fillna(0).sum())
+        if call_vol <= 0:
+            return result
+        pc = round(put_vol / call_vol, 3)
+        result["pc_ratio"]  = pc
+        result["sentiment"] = "FEAR" if pc > 1.2 else ("GREED" if pc < 0.7 else "NEUTRE")
+        if pc > 1.2:
+            if direction == "LONG":
+                result["confluences"].append(f"P/C ratio élevé ({pc:.2f}) — fear extrême = LONG contrarian")
+            else:
+                result["warnings"].append(f"P/C ratio élevé ({pc:.2f}) — fear = défavorable SHORT")
+        elif pc < 0.7:
+            if direction == "SHORT":
+                result["confluences"].append(f"P/C ratio bas ({pc:.2f}) — euphorie = SHORT contrarian")
+            else:
+                result["warnings"].append(f"P/C ratio bas ({pc:.2f}) — greed = défavorable LONG")
+    except Exception:
+        pass
+    return result
+
+
 def score_setup(
     direction: str,
     d1: dict,
@@ -1585,6 +2258,9 @@ def score_setup(
     amd_fvg: dict | None = None,
     liq_cisd_fvg: dict | None = None,
     sweep_setup: dict | None = None,
+    dow: dict | None = None,
+    w1: dict | None = None,
+    macro_corr: dict | None = None,
 ) -> tuple[int, list[str], list[str]]:
     """
     Attribue un score de confluence. Chaque confluence = +1 point.
@@ -1773,6 +2449,38 @@ def score_setup(
     elif direction == "SHORT" and d1_divergence == "BULLISH":
         warnings.append("MACD divergence haussiere D1 — conviction -2")
 
+    # 21. Dow Theory — confirmation inter-marchés + phase de tendance primaire
+    if dow and dow.get("dow_signal") not in (None,):
+        dow_sig   = dow["dow_signal"]
+        dow_phase = dow.get("phase", "UNKNOWN")
+        nq_t      = dow.get("nq_trend",  "NEUTRE")
+        spx_t     = dow.get("spx_trend", "NEUTRE")
+
+        if dow_sig == direction:
+            confluences.append(
+                f"Dow Theory — NQ+SPX confirment {direction} "
+                f"(NQ:{nq_t} SPX:{spx_t})"
+            )
+            if dow.get("volume_confirms"):
+                confluences.append(f"Volume Dow confirme {direction} (bougies {direction} > volume opposé)")
+            # Bonus de phase primaire
+            if dow_phase == "MARKUP" and direction == "LONG":
+                confluences.append("Dow Phase MARKUP — tendance primaire haussière établie")
+            elif dow_phase == "MARKDOWN" and direction == "SHORT":
+                confluences.append("Dow Phase MARKDOWN — tendance primaire baissière établie")
+            elif dow_phase == "DISTRIBUTION" and direction == "SHORT":
+                confluences.append("Dow Phase DISTRIBUTION — essoufflement haussier, SHORT favorisé")
+            elif dow_phase == "REACCUMULATION" and direction == "LONG":
+                confluences.append("Dow Phase REACCUMULATION — fond potentiel, LONG favorisé")
+            elif dow_phase == "ACCUMULATION":
+                warnings.append(f"Dow Phase ACCUMULATION — tendance primaire non établie")
+        elif dow_sig == "DIVERGENCE":
+            warnings.append(
+                f"Dow divergence NQ/SPX — NQ {nq_t} ≠ SPX {spx_t} — signal inter-marchés contradictoire"
+            )
+        elif nq_t != "NEUTRE" and spx_t == "NEUTRE":
+            warnings.append(f"Dow Theory — SPX neutre, confirmation partielle NQ {nq_t}")
+
     # ── Déductions ────────────────────────────────────────────────────────────
     score = len(confluences)
 
@@ -1790,6 +2498,35 @@ def score_setup(
         score -= 2
     elif direction == "SHORT" and d1_divergence == "BULLISH":
         score -= 2
+
+    # Pénalité divergence Dow Theory inter-marchés
+    if dow and dow.get("divergence"):
+        score -= 1
+        # Warning déjà ajouté ci-dessus
+
+    # Pénalité si trade contre la tendance Dow confirmée
+    if dow and dow.get("confirmed") and dow.get("dow_signal") not in ("NEUTRE", "DIVERGENCE"):
+        if direction != dow["dow_signal"]:
+            score -= 1
+            warnings.append(f"CONTRE Dow Theory — NQ+SPX confirment {dow['dow_signal']}")
+
+    # ── SKILL 12 : Weekly Bias W1 ────────────────────────────────────────────
+    if w1 and w1.get("bias") != "NEUTRE":
+        w1_bias = w1["bias"]
+        w1_str  = w1.get("trend_strength", "FAIBLE")
+        if w1_bias == direction:
+            confluences.append(f"W1 {w1_bias} confirme le {direction} (force: {w1_str})")
+        else:
+            penalty = 2 if w1_str == "FORT" else 1
+            score  -= penalty
+            warnings.append(f"CONTRE-TENDANCE W1 {w1_bias} — pénalité -{penalty}")
+
+    # ── SKILL 14 : Corrélation VIX/DXY/Bonds ────────────────────────────────
+    if macro_corr:
+        for c in macro_corr.get("confluences", []):
+            confluences.append(c)
+        for w in macro_corr.get("warnings", []):
+            warnings.append(w)
 
     return max(0, score), confluences, warnings
 
@@ -1818,6 +2555,58 @@ def generate_pro_signal(mtf: dict[str, pd.DataFrame]) -> ProSignal:
     d1   = analyze_d1(df_d1)   if not df_d1.empty else {"bias": "NEUTRE", "trend_strength": "FAIBLE"}
     h1   = analyze_h1(df_h1)
     direction = h1["signal"]
+
+    # ── Skill 11 : Dow Theory — confirmation NQ+SPX + phases primaires ────────
+    dow_data = analyze_dow_theory(df_d1) if not df_d1.empty else {
+        "confirmed": False, "nq_trend": "NEUTRE", "spx_trend": "NEUTRE",
+        "phase": "UNKNOWN", "volume_confirms": False, "divergence": False, "dow_signal": "NEUTRE",
+    }
+    log.info(
+        f"  [DOW] NQ:{dow_data['nq_trend']} SPX:{dow_data['spx_trend']} "
+        f"| Phase:{dow_data['phase']} | Vol:{dow_data['volume_confirms']} "
+        f"| Signal:{dow_data['dow_signal']}"
+    )
+
+    # ── Skill 12 + 17 : Weekly data — W1 Bias + Weinstein Stage ─────────────
+    _raw_w1     = pd.DataFrame()
+    w1_data     = {"bias": "NEUTRE", "trend_strength": "FAIBLE"}
+    weinstein   = {"stage": 0, "stage_name": "INCONNU", "ma30w": None, "bias": "NEUTRE",
+                   "price_above_ma": None, "ma_rising": None}
+    try:
+        _raw_w1 = yf.download("NQ=F", period="210d", interval="1wk", progress=False, auto_adjust=True)
+        if not _raw_w1.empty:
+            if isinstance(_raw_w1.columns, pd.MultiIndex):
+                _raw_w1.columns = _raw_w1.columns.get_level_values(0)
+            w1_data   = analyze_w1(_raw_w1)
+            weinstein = analyze_weinstein_stage(_raw_w1)  # 30-week MA requiert 30 barres
+    except Exception:
+        pass
+    log.info(f"  [W1] Biais hebdo: {w1_data['bias']} (force: {w1_data['trend_strength']})")
+    log.info(f"  [WEINSTEIN] Stage:{weinstein['stage']} {weinstein['stage_name']} | MA30W:{weinstein['ma30w']}")
+
+    # ── Skill 16 : TD Sequential D1 — épuisement de tendance ─────────────────
+    td_d1 = analyze_td_sequential(df_d1, lookback=60) if not df_d1.empty else {
+        "setup": 0, "setup_dir": "NONE", "exhaustion": False, "countdown": 0, "signal": "NEUTRE"
+    }
+    log.info(f"  [TD] Setup:{td_d1['setup']} dir:{td_d1['setup_dir']} exhaust:{td_d1['exhaustion']} signal:{td_d1['signal']}")
+
+    # ── Skill 19 : Put/Call Ratio (QQQ options flow) ──────────────────────────
+    pc_data = analyze_put_call_ratio(direction)
+    if pc_data["pc_ratio"]:
+        log.info(f"  [PUT/CALL] P/C={pc_data['pc_ratio']:.2f} sentiment:{pc_data['sentiment']}")
+
+    # ── Skill 14 : Corrélation VIX/DXY/Bonds ─────────────────────────────────
+    macro_corr_data = analyze_macro_correlation(direction)
+    vix_str = f"{macro_corr_data['vix']:.1f}" if macro_corr_data["vix"] else "N/A"
+    log.info(
+        f"  [MACRO_CORR] VIX:{vix_str} DXY:{macro_corr_data['dxy_trend']} "
+        f"Bonds:{macro_corr_data['bonds_trend']}"
+    )
+    if macro_corr_data["block"]:
+        log.warning(f"  [MACRO_CORR] BLOCAGE: {macro_corr_data['block_reason']}")
+        sig.direction = "SKIP"
+        sig.warnings.append(macro_corr_data["block_reason"])
+        return sig
 
     sig.d1_bias      = d1["bias"]
     sig.h1_signal    = direction
@@ -1862,10 +2651,37 @@ def generate_pro_signal(mtf: dict[str, pd.DataFrame]) -> ProSignal:
                     # Ne pas return : laisser le chemin M5 scalp tenter sa chance
                 elif h4_blocks:
                     log.warning(
-                        f"  [M15 FALLBACK] BLOQUE — {m15_dir} contre structure H4 {h4_bias} "
-                        f"(ADX={m15['adx']:.0f}) — alignement requis"
+                        f"  [M15 FALLBACK] {m15_dir} contre H4 {h4_bias} — D1 neutre, trade autorisé"
                     )
-                    # Ne pas return : laisser le chemin M5 scalp tenter sa chance
+                    direction        = m15_dir
+                    sig.direction    = direction
+                    sig.h1_signal    = f"M15-{direction}"
+                    sig.skip_reasons = []
+                    sig.atr          = float(_atr(df_h1).iloc[-1])
+                    sig.kill_zone    = current_kill_zone()
+                    sig.confluences.append(f"M15 {direction} (ADX={m15['adx']:.0f}, MACD={m15['macd']:.1f})")
+                    sig.grade = "B"
+                    price = m15["close"]
+                    atr_h = sig.atr
+                    if direction == "LONG":
+                        sig.entry = price
+                        sig.sl    = round(price - atr_h * 1.0, 2)
+                        sig.tp1   = round(price + atr_h * 1.0, 2)
+                        sig.tp2   = round(price + atr_h * 2.0, 2)
+                        sig.tp3   = round(price + atr_h * 3.0, 2)
+                    else:
+                        sig.entry = price
+                        sig.sl    = round(price + atr_h * 1.0, 2)
+                        sig.tp1   = round(price - atr_h * 1.0, 2)
+                        sig.tp2   = round(price - atr_h * 2.0, 2)
+                        sig.tp3   = round(price - atr_h * 3.0, 2)
+                    try:
+                        div_ok, div_desc = detect_divergence(df_m15, direction)
+                        if div_ok:
+                            sig.confluences.append(f"Divergence {div_desc}")
+                            log.info(f"  [DIVERGENCE] {div_desc}")
+                    except Exception:
+                        pass
                 else:
                     # M15 aligne avec D1 et H4 — signal valide
                     direction        = m15_dir
@@ -1973,9 +2789,9 @@ def generate_pro_signal(mtf: dict[str, pd.DataFrame]) -> ProSignal:
 
                     if h4_blocks:
                         log.warning(
-                            f"  [M5 SCALP] BLOQUE — {m5_dir} contre H4 {h4_bias}"
+                            f"  [M5 SCALP] {m5_dir} contre H4 {h4_bias} — D1 neutre, trade autorisé"
                         )
-                    elif vwap_blocks:
+                    if vwap_blocks:
                         pass  # déjà loggé ci-dessus
                     else:
                         # Signal M5 scalp validé
@@ -2133,11 +2949,136 @@ def generate_pro_signal(mtf: dict[str, pd.DataFrame]) -> ProSignal:
         vwap=vwap_data, bos_choch=bos_data, sweep=sweep_data,
         displacement=disp_data, vol_regime=vol_data, eq_hl=eq_hl_data,
         amd=amd_data, amd_fvg=amd_fvg_data, liq_cisd_fvg=liq_cisd_fvg_data,
-        sweep_setup=sweep_setup_data,
+        sweep_setup=sweep_setup_data, dow=dow_data,
+        w1=w1_data, macro_corr=macro_corr_data,
     )
     sig.score       = score
     sig.confluences = confluences
     sig.warnings    = warnings
+
+    # ── SKILL 16 : TD Sequential — ajustement post-scoring ───────────────────
+    if td_d1["exhaustion"]:
+        td_sig = td_d1["signal"]
+        if td_sig == "SHORT_EXHAUSTION" and direction == "SHORT":
+            sig.confluences.append(f"TD Sequential D1 {td_d1['setup']} barres (SELL_SETUP) — uptrend épuisé, SHORT confirmé")
+            score += 1
+        elif td_sig == "LONG_EXHAUSTION" and direction == "LONG":
+            sig.confluences.append(f"TD Sequential D1 {td_d1['setup']} barres (BUY_SETUP) — downtrend épuisé, LONG confirmé")
+            score += 1
+        else:
+            sig.warnings.append(f"TD Sequential contre-signal ({td_sig}) — tendance adverse potentiellement épuisée")
+            score -= 1
+
+    # ── SKILL 17 : Weinstein Stage — ajustement post-scoring ─────────────────
+    ws = weinstein["stage"]
+    if ws == 2 and direction == "LONG":
+        sig.confluences.append(f"Weinstein {weinstein['stage_name']} — MA30W haussière, LONG aligné")
+        score += 1
+    elif ws == 4 and direction == "SHORT":
+        sig.confluences.append(f"Weinstein {weinstein['stage_name']} — MA30W baissière, SHORT aligné")
+        score += 1
+    elif ws == 2 and direction == "SHORT":
+        sig.warnings.append(f"WEINSTEIN Stage 2 AVANCE — SHORT contre tendance primaire haussière (-2)")
+        score -= 2
+    elif ws == 4 and direction == "LONG":
+        sig.warnings.append(f"WEINSTEIN Stage 4 DÉCLIN — LONG contre tendance primaire baissière (-2)")
+        score -= 2
+    elif ws in (1, 3):
+        sig.warnings.append(f"Weinstein Stage {ws} {weinstein['stage_name']} — tendance non établie")
+
+    # ── SKILL 19 : Put/Call Ratio — ajustement post-scoring ──────────────────
+    for c in pc_data.get("confluences", []):
+        sig.confluences.append(c)
+        score += 1
+    for w in pc_data.get("warnings", []):
+        sig.warnings.append(w)
+
+    # ── SKILL 28 : Liquidité — cartographie + draw on liquidity (ICT) ─────────
+    try:
+        liq = analyze_liquidity(direction, df_h1, df_m15, sig.atr, sig.entry)
+        for c in liq["confluences"]:
+            sig.confluences.append(c)
+            score += 1
+        for w in liq["warnings"]:
+            sig.warnings.append(w)
+            score -= 1
+        # Ciblage : si le draw est aligné et va au-delà du TP2, étendre le TP2
+        # vers la poche de liquidité (on vise là où sont les stops opposés).
+        _tp = liq.get("tp_suggest")
+        if _tp:
+            if direction == "LONG" and _tp > sig.tp2:
+                log.info(f"  [LIQ] TP2 étendu {sig.tp2}→{_tp} (draw vers liquidité haute)")
+                sig.tp2 = _tp
+            elif direction == "SHORT" and _tp < sig.tp2:
+                log.info(f"  [LIQ] TP2 étendu {sig.tp2}→{_tp} (draw vers liquidité basse)")
+                sig.tp2 = _tp
+        if liq["confluences"] or liq["warnings"]:
+            log.info(f"  [LIQ] +{len(liq['confluences'])} conf / -{len(liq['warnings'])} warn"
+                     + (f" | cible {_tp}" if _tp else ""))
+    except Exception as e:
+        log.warning(f"  [LIQ] indisponible ({e})")
+
+    # ── SKILLS 21-24 : Microstructure (ADR, ES/NQ, RSI div, niveaux ronds) ────
+    try:
+        micro = analyze_microstructure(direction, df_d1, df_m15, sig.entry)
+        for c in micro["confluences"]:
+            sig.confluences.append(c)
+            score += 1
+        for w in micro["warnings"]:
+            sig.warnings.append(w)
+            score -= 1
+        if micro["confluences"] or micro["warnings"]:
+            log.info(f"  [MICRO] +{len(micro['confluences'])} conf / "
+                     f"-{len(micro['warnings'])} warn")
+    except Exception as e:
+        log.warning(f"  [MICRO] indisponible ({e})")
+
+    # ── SKILL 20 : Intel externe (F&G, COT, FedWatch, Myfxbook, TE, FinJuice) ─
+    try:
+        from market_intel_extra import analyze_extra_intel
+        intel = analyze_extra_intel(direction)
+        for c in intel["confluences"]:
+            sig.confluences.append(c)
+            score += 1
+        for w in intel["warnings"]:
+            sig.warnings.append(w)
+            score -= 1
+        if intel["veto"]:
+            sig.direction = "SKIP"
+            log.info("  [INTEL] VETO — événement macro High impact dans l'heure")
+
+        # COPY SMART MONEY — suivre le positionnement institutionnel (COT CFTC).
+        # Conviction forte (|net| >= seuil) : bloquer tout trade contre les institutions.
+        import config as _cfg
+        if getattr(_cfg, "COPY_SMART_MONEY", False):
+            _cot = intel["detail"]["cot"]
+            _thr = getattr(_cfg, "COT_CONVICTION_THRESHOLD", 30.0)
+            if _cot["ok"] and abs(_cot["net_pct"]) >= _thr:
+                _inst_dir = "SHORT" if _cot["net_pct"] < 0 else "LONG"
+                if direction != _inst_dir:
+                    sig.direction = "SKIP"
+                    sig.warnings.append(
+                        f"COPY SMART MONEY: COT net {_cot['net_pct']:+.1f}% — "
+                        f"institutions {_inst_dir}, trade {direction} bloqué")
+                    log.info(f"  [COPY SM] Trade {direction} bloqué — institutions "
+                             f"{_inst_dir} à {_cot['net_pct']:+.1f}%")
+                else:
+                    sig.confluences.append(
+                        f"COPY SMART MONEY: aligné institutions {_inst_dir} "
+                        f"({_cot['net_pct']:+.1f}%)")
+                    score += 1
+        d = intel["detail"]
+        fg_s = d["fear_greed"]["score"]
+        log.info(
+            f"  [INTEL] F&G:{fg_s if fg_s is not None else 'N/A'} "
+            f"COT:{d['cot']['net_pct']:+.1f}% FedW:{d['fedwatch']['bias']} "
+            f"FinJuice:{d['financialjuice']['bias']} | "
+            f"+{len(intel['confluences'])} conf / -{len(intel['warnings'])} warn"
+        )
+    except Exception as e:
+        log.warning(f"  [INTEL] indisponible ({e}) — scoring sans sources externes")
+
+    sig.score = max(0, score)
 
     # ── Grade ─────────────────────────────────────────────────────────────────
     if score >= MIN_SCORE_A_PLUS:
@@ -2172,6 +3113,27 @@ def generate_pro_signal(mtf: dict[str, pd.DataFrame]) -> ProSignal:
             sig.warnings.append(f"Momentum M15 insuffisant ({bear_count}/3 bougies baissières) — SHORT bloqué")
             log.info(f"  [FILTRE] SHORT bloqué — momentum M15 faible ({bear_count}/3 bougies rouges)")
             return sig
+
+    # ── Skill 13 : Confirmation bougie d'entrée (Pin Bar / Engulfing) M5 ────
+    if df_m5 is not None and not df_m5.empty and len(df_m5) >= 4:
+        _cl = df_m5["Close"].to_numpy().ravel()
+        _op = df_m5["Open"].to_numpy().ravel()
+        _hi = df_m5["High"].to_numpy().ravel()
+        _lo = df_m5["Low"].to_numpy().ravel()
+        _i  = -2  # dernière bougie fermée
+        _body  = abs(float(_cl[_i]) - float(_op[_i]))
+        _range = float(_hi[_i]) - float(_lo[_i])
+        _prev  = abs(float(_cl[-3]) - float(_op[-3]))
+        _pin   = _range > 0 and _body / _range < 0.30
+        _eng_long  = direction == "LONG"  and float(_cl[_i]) > float(_op[_i]) and _body > _prev * 1.1
+        _eng_short = direction == "SHORT" and float(_cl[_i]) < float(_op[_i]) and _body > _prev * 1.1
+        if _pin or _eng_long or _eng_short:
+            _pname = "pin bar" if _pin else "engulfing"
+            sig.confluences.append(f"Confirmation bougie M5 ({_pname})")
+            log.info(f"  [SKILL 13] {_pname} confirme {direction} @ M5")
+        else:
+            sig.warnings.append("Pas de pattern de confirmation M5 (pin bar / engulfing)")
+            log.info(f"  [SKILL 13] Aucun pattern M5 — signal maintenu mais conviction réduite")
 
     # ── Niveaux de prix ───────────────────────────────────────────────────────
     atr   = h1["atr"]

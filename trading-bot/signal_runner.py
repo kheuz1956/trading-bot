@@ -17,14 +17,12 @@ from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-try:
-    import websockets as _websockets
-    _WS_AVAILABLE = True
-except ImportError:
-    _WS_AVAILABLE = False
+import socket as _socket
+import ssl as _ssl
 
-# XTB xAPI nécessite une inscription séparée — désactivé jusqu'à activation du compte
-_API_ENABLED = False
+# XTB xAPI — auto-execution via raw SSL TCP (xapi.xtb.com:5124 DEMO)
+# Set True to enable automated order placement. Requires port 5124 open in firewall.
+_API_ENABLED = True
 
 try:
     import yfinance as yf
@@ -86,49 +84,71 @@ _last_signal_key         = None   # dedup: évite de répéter le même ACTIONNA
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class _XTBClient:
-    _URL = "wss://xapi.xtb.com:5124"  # DEMO
+    _HOST = "xapi.xtb.com"
+    _PORT = 5124  # DEMO
 
     def __init__(self):
-        self._ws = None
+        self._sock = None
 
-    async def connect(self):
-        self._ws = await _websockets.connect(
-            self._URL, ping_interval=20, ping_timeout=15, close_timeout=5
-        )
+    def connect(self):
+        ctx = _ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = _ssl.CERT_NONE
+        raw = _socket.create_connection((self._HOST, self._PORT), timeout=10)
+        self._sock = ctx.wrap_socket(raw, server_hostname=self._HOST)
 
-    async def disconnect(self):
-        if self._ws:
-            await self._ws.close()
-            self._ws = None
+    def disconnect(self):
+        if self._sock:
+            try:
+                self._sock.close()
+            except Exception:
+                pass
+            self._sock = None
 
-    async def _cmd(self, command: str, arguments: dict = {}) -> dict:
-        payload = json.dumps({"command": command, "arguments": arguments})
-        await self._ws.send(payload)
-        raw  = await _asyncio.wait_for(self._ws.recv(), timeout=15)
-        resp = json.loads(raw)
+    def _send(self, command: str, arguments: dict = {}):
+        payload = json.dumps({"command": command, "arguments": arguments}) + "\n\n"
+        self._sock.sendall(payload.encode("utf-8"))
+
+    def _recv(self, timeout: float = 15) -> dict:
+        self._sock.settimeout(timeout)
+        data = b""
+        while True:
+            chunk = self._sock.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+            text = data.decode("utf-8", errors="replace").strip()
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError:
+                continue
+
+    def _cmd(self, command: str, arguments: dict = {}) -> dict:
+        self._send(command, arguments)
+        resp = self._recv()
         if not resp.get("status"):
             raise RuntimeError(f"xAPI [{command}]: {resp.get('errorDescr', resp)}")
         return resp
 
-    async def login(self):
+    def login(self):
         if not config.ACCOUNT_ID or not config.PASSWORD:
             raise ValueError("ACCOUNT_ID/PASSWORD manquants dans .env")
-        await self._cmd("login", {
+        self._cmd("login", {
             "userId": config.ACCOUNT_ID, "password": config.PASSWORD,
             "appName": "signal_runner",
         })
 
-    async def get_balance(self) -> float:
-        r = await self._cmd("getMarginLevel")
+    def get_balance(self) -> float:
+        r = self._cmd("getMarginLevel")
         return float(r.get("returnData", {}).get("equity", 0.0))
 
-    async def get_open_trades(self) -> list:
-        r = await self._cmd("getTrades", {"openedOnly": True})
+    def get_open_trades(self) -> list:
+        r = self._cmd("getTrades", {"openedOnly": True})
         return r.get("returnData", [])
 
-    async def place_order(self, cmd: int, volume: float, price: float,
-                          sl: float, tp: float, comment: str = "bot") -> int:
-        r = await self._cmd("tradeTransaction", {"tradeTransInfo": {
+    def place_order(self, cmd: int, volume: float, price: float,
+                    sl: float, tp: float, comment: str = "bot") -> int:
+        r = self._cmd("tradeTransaction", {"tradeTransInfo": {
             "cmd": cmd, "customComment": comment, "expiration": 0,
             "offset": 0, "order": 0, "price": price,
             "sl": sl, "symbol": config.SYMBOL, "tp": tp,
@@ -136,17 +156,17 @@ class _XTBClient:
         }})
         return int(r["returnData"]["order"])
 
-    async def close_partial(self, order_id: int, cmd: int, volume: float, price: float):
-        await self._cmd("tradeTransaction", {"tradeTransInfo": {
+    def close_partial(self, order_id: int, cmd: int, volume: float, price: float):
+        self._cmd("tradeTransaction", {"tradeTransInfo": {
             "cmd": cmd, "customComment": "bot_tp1", "expiration": 0,
             "offset": 0, "order": order_id, "price": price,
             "sl": 0.0, "symbol": config.SYMBOL, "tp": 0.0,
             "type": 2, "volume": volume,
         }})
 
-    async def modify_sl_tp(self, order_id: int, cmd: int, volume: float,
-                           price: float, sl: float, tp: float):
-        await self._cmd("tradeTransaction", {"tradeTransInfo": {
+    def modify_sl_tp(self, order_id: int, cmd: int, volume: float,
+                     price: float, sl: float, tp: float):
+        self._cmd("tradeTransaction", {"tradeTransInfo": {
             "cmd": cmd, "customComment": "bot_modify", "expiration": 0,
             "offset": 0, "order": order_id, "price": price,
             "sl": sl, "symbol": config.SYMBOL, "tp": tp,
@@ -154,35 +174,35 @@ class _XTBClient:
         }})
 
 
-async def _api_open_trade(sig, volume: float) -> tuple:
-    """Ouvre un trade via XTB WebSocket API. Retourne (order_id, equity)."""
+def _api_open_trade(sig, volume: float) -> tuple:
+    """Ouvre un trade via XTB xAPI (raw SSL). Retourne (order_id, equity)."""
     client = _XTBClient()
     try:
-        await client.connect()
-        await client.login()
+        client.connect()
+        client.login()
         cmd = 0 if sig.direction == "LONG" else 1
-        oid = await client.place_order(
+        oid = client.place_order(
             cmd=cmd, volume=volume,
             price=sig.entry, sl=sig.sl, tp=sig.tp2,
             comment=f"bot_pro_{sig.grade}",
         )
-        equity = await client.get_balance()
+        equity = client.get_balance()
         log.info(f"  [API] ✅ Ordre #{oid} | {sig.direction} {volume}lots @ {sig.entry} | SL={sig.sl} TP={sig.tp2}")
         return oid, equity
     except Exception as e:
         log.error(f"  [API] Échec ouverture: {e}")
         return None, 0.0
     finally:
-        await client.disconnect()
+        client.disconnect()
 
 
-async def _api_manage_position(state: dict):
+def _api_manage_position(state: dict):
     """Gère une position ouverte: détection fermeture, TP1 partiel, breakeven, trailing."""
     client = _XTBClient()
     try:
-        await client.connect()
-        await client.login()
-        trades = await client.get_open_trades()
+        client.connect()
+        client.login()
+        trades = client.get_open_trades()
         order_id = state.get("order_id")
         bot_trades = [t for t in trades
                       if (order_id and str(t.get("order")) == str(order_id))
@@ -190,7 +210,7 @@ async def _api_manage_position(state: dict):
 
         # Position fermée côté serveur (SL ou TP touché)
         if not bot_trades:
-            equity = await client.get_balance()
+            equity = client.get_balance()
             entry  = float(state.get("entry_price") or 0)
             side   = state.get("trade_side", "LONG")
             sl_val = float(state.get("sl") or 0)
@@ -242,7 +262,7 @@ async def _api_manage_position(state: dict):
         profit  = float(trade.get("profit", 0.0))
         pnl_pts = (current - open_px) if cmd == 0 else (open_px - current)
 
-        equity = await client.get_balance()
+        equity = client.get_balance()
         state["account_equity"] = equity
         log.info(f"  [API] Position #{oid} | {pnl_pts:+.1f} pts | P&L: {profit:+.2f} USD")
 
@@ -251,12 +271,12 @@ async def _api_manage_position(state: dict):
             close_vol = round(vol * config.TP1_CLOSE_RATIO, 2)
             if close_vol >= 0.01:
                 log.info(f"  [API] TP1 — fermeture {close_vol} lots @ {current:.0f}")
-                await client.close_partial(oid, cmd, close_vol, current)
+                client.close_partial(oid, cmd, close_vol, current)
                 margin = 5 if cmd == 0 else -5
                 new_sl = round(open_px + margin, 2)
                 remain = round(vol - close_vol, 2)
                 tp_val = float(state.get("tp") or trade.get("tp", 0))
-                await client.modify_sl_tp(oid, cmd, remain, current, new_sl, tp_val)
+                client.modify_sl_tp(oid, cmd, remain, current, new_sl, tp_val)
                 state.update({"tp1_done": True, "sl": new_sl, "current_volume": remain})
                 log.info(f"  [API] Breakeven → SL={new_sl}")
 
@@ -269,7 +289,7 @@ async def _api_manage_position(state: dict):
             if (cmd == 0 and new_sl > cur_sl) or (cmd == 1 and 0 < new_sl < cur_sl):
                 tp_val = float(state.get("tp") or trade.get("tp", 0))
                 remain = float(state.get("current_volume") or round(vol * 0.5, 2))
-                await client.modify_sl_tp(oid, cmd, remain, current, new_sl, tp_val)
+                client.modify_sl_tp(oid, cmd, remain, current, new_sl, tp_val)
                 state["sl"] = new_sl
                 log.info(f"  [API] Trailing → SL={new_sl} (+{pnl_pts:.0f} pts)")
 
@@ -278,7 +298,7 @@ async def _api_manage_position(state: dict):
     except Exception as e:
         log.error(f"  [API] manage_position: {e}")
     finally:
-        await client.disconnect()
+        client.disconnect()
 
 
 def load_state() -> dict:
@@ -457,7 +477,7 @@ def run_scan():
     if state.get("entry_price"):
         side  = state.get("trade_side", "?")
         entry = state.get("entry_price", 0)
-        if not (_WS_AVAILABLE and _API_ENABLED):
+        if not _API_ENABLED:
             # Sans API on ne peut pas vérifier si la position est encore ouverte.
             # Si entry_time > 12h, on considère qu'elle a été fermée manuellement.
             entry_time_str = state.get("entry_time")
@@ -488,7 +508,7 @@ def run_scan():
         else:
             log.info(f"  Position {side}@{entry:.0f} déjà ouverte — gestion automatique")
             try:
-                _asyncio.run(_api_manage_position(state))
+                _api_manage_position(state)
             except Exception as e:
                 log.debug(f"  [API] manage_position: {e}")
             return
@@ -659,9 +679,9 @@ def run_scan():
     log.info(f"  Volume: {recommended_volume:.2f} lots"
              + ("  [MODE REPRISE — demi-taille]" if post_breaker else ""))
 
-    # ── Auto-exécution via XTB WebSocket API ────────────────────────────────
-    if _WS_AVAILABLE and _API_ENABLED:
-        order_id, new_equity = _asyncio.run(_api_open_trade(sig, recommended_volume))
+    # ── Auto-exécution via XTB xAPI (raw SSL) ────────────────────────────────
+    if _API_ENABLED:
+        order_id, new_equity = _api_open_trade(sig, recommended_volume)
         if order_id:
             state.update({
                 "entry_price":    sig.entry,
@@ -701,7 +721,7 @@ def run_scan():
 
     # When API is disabled the operator places the order manually; persist entry_price
     # so the next scan does not see entry_price=None and emit another duplicate open event.
-    if not (_WS_AVAILABLE and _API_ENABLED) and not state.get("entry_price"):
+    if not _API_ENABLED and not state.get("entry_price"):
         state.update({
             "entry_price":    sig.entry,
             "trade_side":     sig.direction,

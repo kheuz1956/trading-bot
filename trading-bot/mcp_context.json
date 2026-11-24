@@ -1,0 +1,33 @@
+{
+  "_meta": {
+    "source": "Claude MCP plugins (Alpha Vantage + TipRanks)",
+    "symbol": "QQQ/NDX",
+    "updated_at": "2026-11-23T19:00:00Z",
+    "ttl_hours": 4
+  },
+  "technicals": {
+    "rsi_h1": 62.0,
+    "rsi_h1_prev": 59.1,
+    "rsi_trend": "recovering",
+    "rsi_note": "rebond depuis oversold 20 le 2026-11-20",
+    "atr_h1": 13.74,
+    "atr_h1_prev": 14.53,
+    "atr_trend": "compressing",
+    "atr_note": "pic 20+ le 2026-11-19, compression en cours"
+  },
+  "sentiment": {
+    "tipranks_sentiment": "VeryNegative",
+    "tipranks_pct_30d": -0.1099,
+    "tipranks_pct_7d": 0.0012,
+    "tipranks_portfolios_holding": 85247,
+    "tipranks_avg_allocation": 0.096383,
+    "contrarian_signal": "BULLISH",
+    "contrarian_note": "retail bearish extreme + RSI recovery = rebond probable"
+  },
+  "macro_bias": {
+    "direction": "cautious_bullish",
+    "confidence": 0.55,
+    "reasoning": "RSI H1 62 (recovery), ATR compresse, sentiment retail VeryNegative (contrarian+). Regime RANGING bot coherent.",
+    "invalidation": "RSI < 45 ou ATR expansion > 18 = rebias SKIP"
+  }
+}
